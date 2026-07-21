@@ -226,6 +226,13 @@ standard openings and adjudication. Completed experiments:
   accepted at the upper bound after 1,474 games, 494–410–570 (52.8%),
   estimated +19.8 +/- 13.9 Elo, LLR 2.95. Depth-9 benchmark nodes fell from
   514,650 to 479,976 with unchanged best moves.
+- Improving-aware LMP and LMR (halved late-move-pruning thresholds and one
+  extra reduction ply when the static eval fell versus two plies back):
+  **rejected** at the lower bound after 924 games, 244–290–390 (47.5%),
+  estimated -17.3 +/- 17.0 Elo, LLR -2.96; the code was reverted. A retry
+  should be gentler — e.g. only the LMR half, or improving-aware reverse
+  futility margins instead — since halving LMP thresholds on top of the new
+  continuation-history ordering apparently pruned real refutations.
 
 ## Remaining milestones
 
