@@ -1,10 +1,14 @@
 #!/bin/sh
 set -eu
 
-: "${GOCHESS_BIN:?set GOCHESS_BIN to the pinned GoChess binary}"
 rust_engine=${RUST_ENGINE:-./target/release/chess}
+GOCHESS_BIN=${GOCHESS_BIN:-bench/bin/gochess-c3da983}
 openings=${OPENINGS:-bench/data/8moves_v3.pgn}
 games=${GAMES:-10000}
+
+if ! test -x "$GOCHESS_BIN"; then
+  GOCHESS_BIN="$GOCHESS_BIN" ./bench/build-gochess.sh
+fi
 
 test -x "$rust_engine"
 test -x "$GOCHESS_BIN"

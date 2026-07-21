@@ -49,6 +49,7 @@ Build the release binary before collecting numbers:
 
 ```sh
 cargo build --release
+./bench/build-gochess.sh
 ./target/release/chess bench perft
 ./target/release/chess bench search 6
 ./target/release/chess bench bk 6
@@ -60,9 +61,8 @@ All search modes use fixed depth and fresh 64 MB hash tables, making node
 counts, scores, best moves, and PVs deterministic. Wall time and NPS remain
 machine-dependent. Suite provenance is recorded in `bench/ATTRIBUTION.md`.
 
+`bench/build-gochess.sh` verifies and builds the sibling checkout at
+`../../go/chess`; override it with `GOCHESS_SOURCE` when necessary.
 `bench/run-sprt.sh` runs the planned fixed-seed, reversed-color Cute Chess
-SPRT. It requires `GOCHESS_BIN` to point at GoChess commit
-`c3da983fff608ded2c1c59687c030aeba6998f8a` and `OPENINGS` to point at
-`8moves_v3.pgn`. The GoChess repository location is intentionally not guessed;
-this checkout contains neither the reference source nor metadata identifying
-its upstream URL.
+SPRT and builds the pinned reference automatically. `OPENINGS` must point at
+`8moves_v3.pgn` if it is not installed at `bench/data/8moves_v3.pgn`.

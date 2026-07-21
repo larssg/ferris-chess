@@ -1,1 +1,4 @@
 /target
+/bench/bin/
+/bench/data/wac.epd
+/bench/results/*.pgn
