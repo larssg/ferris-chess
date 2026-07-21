@@ -168,6 +168,17 @@ order so exchange sequences stay reproducible. Depth 9 fell to 309--317 ms
 (up to roughly 1.67M NPS) with identical node counts, scores, best moves, and
 PVs; the profile's next-largest costs are evaluation, `make_move`, and
 mailbox move generation.
+Evaluation's per-piece material and piece-square walk then became a running
+board accumulator maintained by `place_piece`/`remove_piece`, with the endgame
+king-table switch applied as a per-king correction and a drift test comparing
+the accumulator against from-scratch rebuilds. Depth 9 fell to 294--301 ms
+(up to roughly 1.75M NPS). An exact direct-mapped pawn-structure cache — keyed
+and fully verified by both pawn bitboards, owned by the engine — then removed
+most remaining pawn-term work. Depth 9 fell to 269--284 ms (up to roughly
+1.91M NPS), always with identical node counts, scores, best moves, and PVs.
+The profile now ranks `make_move`, mailbox `generate_pseudo_moves`,
+`square_attacked` legality filtering, and slider move emission as the largest
+remaining costs.
 
 ## Next checkpoint
 

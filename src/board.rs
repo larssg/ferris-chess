@@ -1231,7 +1231,7 @@ pub fn square_name(s: u8) -> String {
 }
 /// SplitMix64 finalizer: scrambles an integer into a well-distributed 64-bit
 /// value. Used to derive per-feature hash keys in [`Board::compute_hash`].
-const fn mix64(mut z: u64) -> u64 {
+pub(crate) const fn mix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9e3779b97f4a7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);

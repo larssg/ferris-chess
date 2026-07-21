@@ -8,7 +8,8 @@
 //! alpha/beta bound.
 
 use crate::eval::piece_value;
-use crate::{Board, Move, PieceKind, evaluate, static_exchange_eval};
+use crate::eval::{PawnCache, evaluate_cached};
+use crate::{Board, Move, PieceKind, static_exchange_eval};
 use std::{
     sync::{
         Arc,
@@ -376,6 +377,9 @@ pub struct Engine {
     order_scores: Box<[i32]>,
     /// Stack of position hashes along the current line, for repetition detection.
     hashes: Vec<u64>,
+    /// Exact cache for the pawn-structure evaluation term, which depends only
+    /// on the pawn bitboards and so survives across moves and searches.
+    pawn_cache: PawnCache,
     nodes: u64,
     start: Instant,
     limit: Duration,
@@ -404,6 +408,7 @@ impl Engine {
             move_buffers: std::array::from_fn(|_| Vec::with_capacity(48)),
             order_scores: vec![0; 1 << 15].into_boxed_slice(),
             hashes: Vec::new(),
+            pawn_cache: PawnCache::new(),
             nodes: 0,
             start: Instant::now(),
             limit: Duration::ZERO,
@@ -721,7 +726,7 @@ impl Engine {
         }
         // Hard ceiling on recursion depth; just evaluate statically.
         if ply >= 63 {
-            return evaluate(b);
+            return evaluate_cached(b, &mut self.pawn_cache);
         }
         // Check the clock and node budget periodically rather than every node.
         if self.nodes & 2047 == 0
@@ -770,7 +775,7 @@ impl Engine {
             None
         } else {
             tt.and_then(|entry| entry.static_eval)
-                .or_else(|| i16::try_from(evaluate(b)).ok())
+                .or_else(|| i16::try_from(evaluate_cached(b, &mut self.pawn_cache)).ok())
         };
         // Reverse futility pruning: in a shallow non-PV node, if the static eval
         // already exceeds beta by a depth-scaled margin, assume the opponent
@@ -1057,7 +1062,7 @@ impl Engine {
             return 0;
         }
         if ply >= 63 {
-            return evaluate(b);
+            return evaluate_cached(b, &mut self.pawn_cache);
         }
         let in_check = b.in_check(b.side);
         // "Stand pat": the score for making no capture at all. When not in check
@@ -1066,7 +1071,7 @@ impl Engine {
             .tt
             .get(b.hash, ply)
             .and_then(|entry| entry.static_eval)
-            .map_or_else(|| evaluate(b), i32::from);
+            .map_or_else(|| evaluate_cached(b, &mut self.pawn_cache), i32::from);
         if !in_check {
             if stand >= beta {
                 return stand;
@@ -1287,6 +1292,7 @@ fn score_from_tt(score: i32, ply: u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evaluate;
 
     #[test]
     fn repetition_uses_same_side_and_halfmove_window() {

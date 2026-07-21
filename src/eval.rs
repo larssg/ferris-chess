@@ -89,6 +89,66 @@ fn is_endgame(board: &Board) -> bool {
 /// mailbox rescans and temporary pawn lists. The running `score` is
 /// White-positive throughout and only flipped to side-relative at the return.
 pub fn evaluate(board: &Board) -> i32 {
+    evaluate_with(board, None)
+}
+
+/// [`evaluate`] with the pawn-structure term served from `cache` when its two
+/// pawn bitboards match. Hits verify the full key, so the result is
+/// bit-identical to an uncached evaluation.
+pub(crate) fn evaluate_cached(board: &Board, cache: &mut PawnCache) -> i32 {
+    evaluate_with(board, Some(cache))
+}
+
+/// A direct-mapped cache for the combined White-positive pawn-structure term,
+/// which depends only on the two pawn bitboards. Pawn formations persist
+/// across most of a search subtree, so nearly every node hits. The zeroed
+/// initial entries are themselves exact: an empty pawn set scores zero.
+pub(crate) struct PawnCache {
+    entries: Vec<PawnCacheEntry>,
+}
+
+#[derive(Clone, Copy)]
+struct PawnCacheEntry {
+    white_pawns: u64,
+    black_pawns: u64,
+    score: i32,
+}
+
+impl PawnCache {
+    const ENTRIES: usize = 1 << 14;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: vec![
+                PawnCacheEntry {
+                    white_pawns: 0,
+                    black_pawns: 0,
+                    score: 0,
+                };
+                Self::ENTRIES
+            ],
+        }
+    }
+
+    /// The combined pawn-structure score for the given pawn sets, computed on
+    /// a miss and remembered for next time.
+    fn pawn_score(&mut self, white_pawns: u64, black_pawns: u64) -> i32 {
+        let index =
+            board::mix64(white_pawns ^ board::mix64(black_pawns)) as usize & (Self::ENTRIES - 1);
+        let entry = &mut self.entries[index];
+        if (entry.white_pawns, entry.black_pawns) != (white_pawns, black_pawns) {
+            *entry = PawnCacheEntry {
+                white_pawns,
+                black_pawns,
+                score: pawn_structure(white_pawns, black_pawns, Color::White)
+                    - pawn_structure(black_pawns, white_pawns, Color::Black),
+            };
+        }
+        entry.score
+    }
+}
+
+fn evaluate_with(board: &Board, cache: Option<&mut PawnCache>) -> i32 {
     let endgame = is_endgame(board);
     // Material and piece-square values are maintained incrementally by
     // make/unmake; only the endgame king-table switch is applied here.
@@ -124,8 +184,13 @@ pub fn evaluate(board: &Board) -> i32 {
         score -= king_safety(board, Color::Black, &pawns[1]);
     }
     score += rooks(board, Color::White) - rooks(board, Color::Black);
-    score += pawn_structure(pawns[0], pawns[1], Color::White);
-    score -= pawn_structure(pawns[1], pawns[0], Color::Black);
+    score += match cache {
+        Some(cache) => cache.pawn_score(pawns[0], pawns[1]),
+        None => {
+            pawn_structure(pawns[0], pawns[1], Color::White)
+                - pawn_structure(pawns[1], pawns[0], Color::Black)
+        }
+    };
     if endgame {
         score += mop_up(board, score);
     }
