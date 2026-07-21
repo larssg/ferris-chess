@@ -61,9 +61,13 @@ Implemented public interfaces and behavior include:
 - Deterministic `bench perft`, `bench search`, `bench bk`, `bench wac`, and
   arbitrary EPD modes.
 - Pinned GoChess build helper, exact BK/WAC inputs, and fixed SPRT harness.
+- GoChess-tuned material and piece-square values with its endgame king switch.
+- Separately testable bishop-pair, pawn-structure, king-safety, rook-placement,
+  and endgame mop-up evaluation terms.
+- Static exchange evaluation used for capture ordering and quiescence pruning.
 
-At the last checkpoint, all 14 Rust tests, warning-free Clippy, release builds,
-GoChess tests, and UCI smoke tests passed.
+At the current worktree checkpoint, all 16 Rust tests, warning-free Clippy,
+release builds, GoChess tests, and UCI smoke tests passed.
 
 ## Recorded baseline
 
@@ -82,22 +86,25 @@ Full details are in `bench/BASELINE.md`. Important results:
 These results make search pruning, move ordering, and evaluation parity the
 next priority. Tactical-suite results are diagnostics, not Elo evidence.
 
+## Current checkpoint
+
+GoChess evaluation and SEE parity is implemented in the current worktree:
+
+- Ported the pinned tuned material and middlegame/endgame piece-square tables.
+- Matched the reference's discrete endgame king-table selection. Continuous
+  tapered evaluation remains a post-parity experiment.
+- Ported bishop pair, pawn structure, king safety, rook placement, and mop-up.
+- Ported SEE and use it for good/bad capture ordering and quiescence pruning.
+- Added fixed evaluation and exchange fixtures.
+- Passed the quality loop, release build, depth-4 benchmark, and UCI smoke test.
+
+The depth-4 search benchmark now visits 77,698 total nodes. Kiwipete fell from
+407,531 to 36,995 nodes, and the middlegame fell from 128,890 to 31,370 while
+changing its best move to GoChess's `f3e5`.
+
 ## Next checkpoint
 
-Reach GoChess evaluation and SEE parity before layering additional pruning:
-
-1. Differentially inspect the pinned GoChess `eval.go`, its tables, and tests.
-2. Port tuned material and middlegame/endgame piece-square values.
-3. Add tapered/phased king evaluation.
-4. Port bishop pair, pawn structure, king safety, rook placement, and mop-up
-   terms as separately testable evaluation components.
-5. Port static exchange evaluation from GoChess and add differential SEE tests.
-6. Add fixed FEN evaluation fixtures comparing FerrisChess with the pinned
-   reference, allowing only intentional representation/rounding differences.
-7. Run the quality loop, release benchmarks, and UCI smoke test; record this as
-   a standalone commit.
-
-After evaluation/SEE parity, port GoChess search behavior in measured batches:
+Port the first measured GoChess search-behavior batch:
 
 1. TT static-evaluation caching.
 2. Aspiration widening and PVS details.

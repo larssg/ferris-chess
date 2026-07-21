@@ -1,4 +1,5 @@
-use crate::{Board, Color, Move, PieceKind};
+use crate::eval::piece_value;
+use crate::{Board, Move, PieceKind, evaluate, static_exchange_eval};
 use std::{
     sync::{
         Arc,
@@ -556,7 +557,10 @@ impl Engine {
         }
         for m in moves {
             if !in_check {
-                let gain = b.piece_at(m.to).map_or(100, |p| value(p.kind));
+                if m.promotion.is_none() && static_exchange_eval(b, m) < 0 {
+                    continue;
+                }
+                let gain = b.piece_at(m.to).map_or(100, |p| piece_value(p.kind));
                 if stand + gain + 200 < alpha {
                     continue;
                 }
@@ -575,8 +579,13 @@ impl Engine {
     }
     fn order(&self, b: &Board, moves: &mut [Move], ply: usize) {
         moves.sort_unstable_by_key(|m| {
-            std::cmp::Reverse(if let Some(p) = b.piece_at(m.to) {
-                100_000 + 10 * value(p.kind) - value(b.piece_at(m.from).unwrap().kind)
+            std::cmp::Reverse(if b.piece_at(m.to).is_some() || m.en_passant {
+                let see = static_exchange_eval(b, *m);
+                if see >= 0 {
+                    100_000 + see
+                } else {
+                    50_000 + see
+                }
             } else if m.promotion.is_some() {
                 90_000
             } else if ply < 64 && *m == self.killers[ply][0] {
@@ -655,53 +664,10 @@ fn score_from_tt(score: i32, ply: u8) -> i32 {
     }
 }
 
-fn value(k: PieceKind) -> i32 {
-    match k {
-        PieceKind::Pawn => 100,
-        PieceKind::Knight => 320,
-        PieceKind::Bishop => 335,
-        PieceKind::Rook => 500,
-        PieceKind::Queen => 950,
-        PieceKind::King => 20_000,
-    }
-}
-const PST: [[i16; 64]; 6] = include!("pst.in");
-pub fn evaluate(b: &Board) -> i32 {
-    let mut score = 0;
-    let mut bishops = [0; 2];
-    for sq in 0..64 {
-        let Some(p) = b.piece_at(sq) else { continue };
-        let idx = if p.color == Color::White {
-            sq as usize
-        } else {
-            (sq ^ 56) as usize
-        };
-        let v = value(p.kind) + PST[p.kind as usize - 1][idx] as i32;
-        if p.color == Color::White {
-            score += v
-        } else {
-            score -= v
-        }
-        if p.kind == PieceKind::Bishop {
-            bishops[if p.color == Color::White { 0 } else { 1 }] += 1
-        }
-    }
-    if bishops[0] >= 2 {
-        score += 40
-    }
-    if bishops[1] >= 2 {
-        score -= 40
-    }
-    if b.side == Color::White {
-        score
-    } else {
-        -score
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Color;
 
     #[test]
     fn finds_mate_in_one() {

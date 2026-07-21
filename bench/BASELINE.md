@@ -27,3 +27,20 @@ search pruning and move ordering the highest-priority parity work.
 
 These use different stopping conditions and are recorded as independent
 baselines, not as a direct strength comparison.
+
+## Evaluation and SEE parity checkpoint
+
+After porting the pinned GoChess classical evaluator and static exchange
+evaluation, FerrisChess produced this release depth-4 search benchmark:
+
+| Position | Nodes | Score | Best move |
+|---|---:|---:|---|
+| Start position | 9,333 | 0 | `g1f3` |
+| Kiwipete | 36,995 | 45 | `e2a6` |
+| Middlegame | 31,370 | 34 | `f3e5` |
+| Total | 77,698 | — | — |
+
+The run completed in 230 ms at 337,817 NPS on the same development machine.
+Compared with the original FerrisChess baseline, total nodes fell by about
+85.5%; the middlegame best move now matches the pinned GoChess result. These
+figures remain diagnostic because the search algorithms are not yet at parity.
