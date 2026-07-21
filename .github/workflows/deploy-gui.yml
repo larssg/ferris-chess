@@ -1,0 +1,67 @@
+name: Deploy web GUI to GitHub Pages
+
+# Build the wasm/trunk web GUI and publish gui/dist/ to GitHub Pages.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow the deploy job to publish to Pages, and let it read the repo.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One in-flight deploy at a time; newer pushes cancel a stale build.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust with the wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-trunk-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-trunk-
+
+      - name: Install trunk
+        run: |
+          curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xzf - -C /usr/local/bin trunk
+
+      # --public-url makes every emitted asset URL absolute under the Pages
+      # subpath (https://larssg.github.io/ferris-chess/), so the wasm loader
+      # and its glue resolve correctly when served from a project page.
+      - name: Build the web GUI
+        working-directory: gui
+        run: trunk build --release --public-url /ferris-chess/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: gui/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
