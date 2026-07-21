@@ -24,6 +24,16 @@ const MATE: i32 = 90_000;
 const RFP_MAX_DEPTH: u8 = 6;
 /// ...and requires the static eval to clear beta by this much per remaining ply.
 const RFP_MARGIN: i32 = 80;
+/// Razoring replaces a shallow search with quiescence when the static score is
+/// already well below alpha. The margin grows slightly with remaining depth.
+const RAZOR_MAX_DEPTH: u8 = 3;
+const RAZOR_BASE_MARGIN: i32 = 300;
+const RAZOR_DEPTH_MARGIN: i32 = 60;
+/// Shallow quiet-move pruning margins, indexed by remaining depth.
+const FUTILITY_MARGIN: [i32; 3] = [0, 200, 500];
+/// Number of legal moves searched before late quiet moves may be discarded,
+/// indexed by remaining depth.
+const LMP_THRESHOLD: [usize; 6] = [0, 4, 6, 10, 15, 21];
 /// The stopping conditions for a search, mirroring the UCI `go` parameters. A
 /// search ends when any active limit is reached; the clock fields feed the time
 /// budget computed by the UCI adapter, and `root_moves` restricts the search to
@@ -678,6 +688,18 @@ impl Engine {
                 return i32::from(static_eval.unwrap()) - margin;
             }
         }
+        // Razoring: when a shallow non-PV position is far below alpha, ask
+        // quiescence whether forcing captures can rescue it. If not, avoid the
+        // full-width search.
+        if !node.pv && !in_check && depth <= RAZOR_MAX_DEPTH {
+            let margin = RAZOR_BASE_MARGIN + RAZOR_DEPTH_MARGIN * i32::from(depth);
+            if i32::from(static_eval.unwrap()) + margin <= alpha {
+                let score = self.qsearch(b, alpha, beta, ply);
+                if score <= alpha {
+                    return score;
+                }
+            }
+        }
         // Null-move pruning: let the opponent move twice in a row (via a reduced
         // search). If we still hold above beta, the position is so good that the
         // real move will too. Skipped without non-pawn material, where zugzwang
@@ -740,8 +762,27 @@ impl Engine {
         }
         let mut best = Move::default();
         let mut best_score = -INF;
+        let can_futility_prune = !in_check && !node.pv && depth <= 2;
+        let can_lmp = !in_check && !node.pv && depth <= 5;
         for (i, m) in moves.into_iter().enumerate() {
             let capture = b.piece_at(m.to).is_some() || m.en_passant;
+            let quiet = !capture && m.promotion.is_none();
+            let legal_moves = i + 1;
+            // Futility pruning: after one move has established a valid score,
+            // skip shallow quiets whose optimistic static bound cannot raise
+            // alpha.
+            if can_futility_prune
+                && legal_moves > 1
+                && quiet
+                && i32::from(static_eval.unwrap()) + FUTILITY_MARGIN[depth as usize] <= alpha
+            {
+                continue;
+            }
+            // Late-move pruning: at low-depth non-PV nodes, sufficiently late
+            // quiet moves are unlikely to refute the current bound.
+            if can_lmp && legal_moves > LMP_THRESHOLD[depth as usize] && quiet {
+                continue;
+            }
             self.hashes.push(b.hash);
             let undo = b.make_move(m);
             // Late-move reduction: quiet moves ordered late in a non-PV node are
