@@ -107,8 +107,9 @@ const BOUND_UPPER: u8 = 2;
 #[repr(C)]
 struct Slot {
     key: u64,
-    score: i32,
+    score: i16,
     best: u16,
+    static_eval: i16,
     depth: u8,
     flags: u8,
 }
@@ -125,6 +126,7 @@ struct Entry {
     score: i32,
     bound: u8,
     best: Move,
+    static_eval: Option<i16>,
 }
 
 struct TranspositionTable {
@@ -158,9 +160,10 @@ impl TranspositionTable {
             .find(|slot| slot.key == key && slot.depth != 0)
             .map(|slot| Entry {
                 depth: slot.depth - 1,
-                score: score_from_tt(slot.score, ply),
+                score: score_from_tt(unpack_tt_score(slot.score), ply),
                 bound: slot.flags & 3,
                 best: unpack_move(slot.best),
+                static_eval: (slot.static_eval != i16::MIN).then_some(slot.static_eval),
             })
     }
 
@@ -184,12 +187,21 @@ impl TranspositionTable {
         let old = slots[replace];
         if old.key == key && old.depth > entry.depth.saturating_add(4) && entry.bound != BOUND_EXACT
         {
+            if old.static_eval == i16::MIN
+                && let Some(static_eval) = entry.static_eval
+            {
+                slots[replace].static_eval = static_eval;
+            }
             return;
         }
+        let static_eval = entry
+            .static_eval
+            .or_else(|| (old.key == key && old.static_eval != i16::MIN).then_some(old.static_eval));
         slots[replace] = Slot {
             key,
-            score: score_to_tt(entry.score, ply),
+            score: pack_tt_score(score_to_tt(entry.score, ply)),
             best: pack_move(entry.best),
+            static_eval: static_eval.unwrap_or(i16::MIN),
             depth: entry.depth.saturating_add(1),
             flags: generation << 2 | entry.bound,
         };
@@ -306,11 +318,12 @@ impl Engine {
         result.best_move = Some(legal[0]);
         let mut board = b.clone();
         for depth in 1..=limits.depth {
-            let (mut alpha, mut beta) = if depth > 3 {
-                (result.score - 40, result.score + 40)
-            } else {
+            let (mut alpha, mut beta) = if depth == 1 {
                 (-INF, INF)
+            } else {
+                (result.score - 50, result.score + 50)
             };
+            let mut delta = 50;
             loop {
                 let (score, best) = self.root(&mut board, depth, alpha, beta, &legal);
                 if self.stopped {
@@ -318,11 +331,23 @@ impl Engine {
                     return result;
                 }
                 if score <= alpha {
-                    alpha = -INF;
+                    if delta >= 200 {
+                        alpha = -INF;
+                        beta = INF;
+                    } else {
+                        delta = 200;
+                        alpha = result.score - delta;
+                    }
                     continue;
                 }
                 if score >= beta {
-                    beta = INF;
+                    if delta >= 200 {
+                        alpha = -INF;
+                        beta = INF;
+                    } else {
+                        delta = 200;
+                        beta = result.score + delta;
+                    }
                     continue;
                 }
                 result.score = score;
@@ -367,10 +392,17 @@ impl Engine {
         moves.retain(|chess_move| root_moves.contains(chess_move));
         self.order(b, &mut moves, 0);
         let mut best = None;
-        for m in moves {
+        for (index, m) in moves.into_iter().enumerate() {
             self.hashes.push(b.hash);
             let undo = b.make_move(m);
-            let score = -self.negamax(b, depth - 1, -beta, -alpha, 1, true);
+            let mut score = if index == 0 {
+                -self.negamax(b, depth - 1, -beta, -alpha, 1, true)
+            } else {
+                -self.negamax(b, depth - 1, -alpha - 1, -alpha, 1, false)
+            };
+            if index > 0 && score > alpha && score < beta {
+                score = -self.negamax(b, depth - 1, -beta, -alpha, 1, true);
+            }
             b.unmake_move(m, undo);
             self.hashes.pop();
             if self.stopped {
@@ -389,6 +421,7 @@ impl Engine {
                     score: alpha,
                     bound: BOUND_EXACT,
                     best: best_move,
+                    static_eval: None,
                 },
                 0,
             );
@@ -463,6 +496,12 @@ impl Engine {
             return if in_check { -MATE + ply as i32 } else { 0 };
         }
         self.order(b, &mut moves, ply as usize);
+        let static_eval = if in_check {
+            None
+        } else {
+            tt.and_then(|entry| entry.static_eval)
+                .or_else(|| i16::try_from(evaluate(b)).ok())
+        };
         if let Some(e) = tt
             && let Some(i) = moves.iter().position(|m| {
                 m.from == e.best.from && m.to == e.best.to && m.promotion == e.best.promotion
@@ -521,6 +560,7 @@ impl Engine {
                 score: best_score,
                 bound,
                 best,
+                static_eval,
             },
             ply,
         );
@@ -538,7 +578,11 @@ impl Engine {
             return evaluate(b);
         }
         let in_check = b.in_check(b.side);
-        let stand = evaluate(b);
+        let stand = self
+            .tt
+            .get(b.hash, ply)
+            .and_then(|entry| entry.static_eval)
+            .map_or_else(|| evaluate(b), i32::from);
         if !in_check {
             if stand >= beta {
                 return stand;
@@ -654,6 +698,27 @@ fn score_to_tt(score: i32, ply: u8) -> i32 {
     }
 }
 
+fn pack_tt_score(score: i32) -> i16 {
+    if score >= MATE - 64 {
+        (30_000 + score - (MATE - 64)).min(i32::from(i16::MAX)) as i16
+    } else if score <= -MATE + 64 {
+        (-30_000 + score + (MATE - 64)).max(i32::from(i16::MIN)) as i16
+    } else {
+        score.clamp(-29_999, 29_999) as i16
+    }
+}
+
+fn unpack_tt_score(score: i16) -> i32 {
+    let score = i32::from(score);
+    if score >= 30_000 {
+        MATE - 64 + score - 30_000
+    } else if score <= -30_000 {
+        -MATE + 64 + score + 30_000
+    } else {
+        score
+    }
+}
+
 fn score_from_tt(score: i32, ply: u8) -> i32 {
     if score >= MATE - 64 {
         score - i32::from(ply)
@@ -723,12 +788,27 @@ mod tests {
                 score: MATE - 7,
                 bound: BOUND_EXACT,
                 best: chess_move,
+                static_eval: Some(123),
             },
             7,
         );
         let entry = table.get(42, 3).unwrap();
         assert_eq!(entry.score, MATE - 3);
         assert_eq!(entry.best, chess_move);
+        assert_eq!(entry.static_eval, Some(123));
+
+        table.store(
+            42,
+            Entry {
+                depth: 10,
+                score: 17,
+                bound: BOUND_LOWER,
+                best: chess_move,
+                static_eval: None,
+            },
+            0,
+        );
+        assert_eq!(table.get(42, 0).unwrap().static_eval, Some(123));
     }
 
     #[test]

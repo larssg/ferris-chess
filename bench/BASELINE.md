@@ -44,3 +44,20 @@ The run completed in 230 ms at 337,817 NPS on the same development machine.
 Compared with the original FerrisChess baseline, total nodes fell by about
 85.5%; the middlegame best move now matches the pinned GoChess result. These
 figures remain diagnostic because the search algorithms are not yet at parity.
+
+## TT evaluation cache and PVS checkpoint
+
+Packing TT scores to 16 bits made room for a cached static evaluation without
+changing the four-entry cluster's 64-byte size. Together with reference-style
+aspiration widening and root PVS, the release depth-4 benchmark became:
+
+| Position | Nodes | Score | Best move |
+|---|---:|---:|---|
+| Start position | 4,552 | 0 | `g1f3` |
+| Kiwipete | 21,573 | 45 | `e2a6` |
+| Middlegame | 21,070 | 34 | `f3e5` |
+| Total | 47,195 | — | — |
+
+The run completed in 159 ms at 296,823 NPS. Nodes fell about 39.3% from the
+evaluation/SEE checkpoint while every recorded score, best move, and PV stayed
+unchanged.
