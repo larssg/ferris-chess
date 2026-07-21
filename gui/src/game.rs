@@ -77,6 +77,8 @@ pub struct GameState {
     turn_started: Option<Instant>,
     pub status: GameStatus,
     pub use_book: bool,
+    /// Difficulty as a search-depth cap; `None` means full strength.
+    pub depth_limit: Option<u8>,
     pub last_move: Option<Move>,
 }
 
@@ -88,7 +90,12 @@ fn clock_index(color: Color) -> usize {
 }
 
 impl GameState {
-    pub fn new(human: Color, time_control: TimeControl, use_book: bool) -> Self {
+    pub fn new(
+        human: Color,
+        time_control: TimeControl,
+        use_book: bool,
+        depth_limit: Option<u8>,
+    ) -> Self {
         Self {
             board: Board::startpos(),
             human,
@@ -100,6 +107,7 @@ impl GameState {
             turn_started: Some(Instant::now()),
             status: GameStatus::Ongoing,
             use_book,
+            depth_limit,
             last_move: None,
         }
     }

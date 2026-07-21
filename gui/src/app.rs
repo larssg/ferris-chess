@@ -48,7 +48,12 @@ impl ChessApp {
     fn start_game(&mut self, config: GameConfig, ctx: &egui::Context) {
         let human = resolve_side(config.side, ctx);
         self.engine.new_game();
-        self.game = Some(GameState::new(human, config.time_control, config.use_book));
+        self.game = Some(GameState::new(
+            human,
+            config.time_control,
+            config.use_book,
+            config.difficulty.depth_limit(),
+        ));
         self.config = Some(config);
         self.board_ui = BoardUi::new(human == Color::Black);
         self.move_input = MoveInput::default();
@@ -264,11 +269,16 @@ fn start_engine_turn_if_due(game: &mut GameState, engine: &mut EngineDriver) {
     }
     let engine_side = game.board.side;
     let (soft, hard) = time_budget(game.remaining(engine_side), game.increment, None);
-    let limits = SearchLimits {
+    let mut limits = SearchLimits {
         soft_time: Some(soft),
         time: hard,
         ..Default::default()
     };
+    // Reduced difficulty caps the depth; the clock budget stays as a
+    // safety net so a capped search can still never lose on time.
+    if let Some(depth) = game.depth_limit {
+        limits.depth = depth;
+    }
     engine.search(game.board.clone(), limits);
 }
 
