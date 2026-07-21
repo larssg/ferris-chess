@@ -371,6 +371,9 @@ pub struct Engine {
     /// One reusable legal-move buffer per ply. Recursive calls use distinct
     /// slots, so move generation does not allocate at each search node.
     move_buffers: [Vec<Move>; 64],
+    /// Scratch space keyed by packed move, so sorting computes expensive SEE
+    /// ordering scores once per move rather than once per comparison.
+    order_scores: Box<[i32]>,
     /// Stack of position hashes along the current line, for repetition detection.
     hashes: Vec<u64>,
     nodes: u64,
@@ -399,6 +402,7 @@ impl Engine {
             counter_moves: [[Move::default(); 64]; 64],
             move_stack: [Move::default(); 64],
             move_buffers: std::array::from_fn(|_| Vec::with_capacity(48)),
+            order_scores: vec![0; 1 << 15].into_boxed_slice(),
             hashes: Vec::new(),
             nodes: 0,
             start: Instant::now(),
@@ -1121,44 +1125,52 @@ impl Engine {
         *history += bonus - *history * bonus.abs() / HISTORY_MAX;
     }
 
-    fn order(&self, b: &Board, moves: &mut [Move], ply: usize) {
+    fn order(&mut self, b: &Board, moves: &mut [Move], ply: usize) {
         let counter_move = if ply > 0 && ply <= 64 {
             let previous = self.move_stack[ply - 1];
             self.counter_moves[previous.from as usize][previous.to as usize]
         } else {
             Move::default()
         };
+        for &chess_move in moves.iter() {
+            let score = self.move_order_score(b, chess_move, ply, counter_move);
+            self.order_scores[usize::from(pack_move(chess_move))] = score;
+        }
         moves.sort_unstable_by_key(|m| {
-            let capture = b.piece_at(m.to).is_some() || m.en_passant;
-            let mut score = if capture {
-                let see = static_exchange_eval(b, *m);
-                if see >= 0 {
-                    100_000 + see
-                } else {
-                    50_000 + see
-                }
-            } else {
-                0
-            };
-            if let Some(promotion) = m.promotion {
-                score += 90_000 + piece_value(promotion);
-            }
-            if !capture && m.promotion.is_none() && ply < 64 {
-                score = if *m == self.killers[ply][0] {
-                    80_000
-                } else if *m == self.killers[ply][1] {
-                    79_000
-                } else if *m == counter_move && counter_move != Move::default() {
-                    78_000
-                } else {
-                    score
-                };
-            }
-            if score == 0 {
-                score = self.history[m.from as usize][m.to as usize];
-            }
-            std::cmp::Reverse(score)
+            std::cmp::Reverse(self.order_scores[usize::from(pack_move(*m))])
         })
+    }
+
+    fn move_order_score(&self, b: &Board, chess_move: Move, ply: usize, counter_move: Move) -> i32 {
+        let capture = b.piece_at(chess_move.to).is_some() || chess_move.en_passant;
+        let mut score = if capture {
+            let see = static_exchange_eval(b, chess_move);
+            if see >= 0 {
+                100_000 + see
+            } else {
+                50_000 + see
+            }
+        } else {
+            0
+        };
+        if let Some(promotion) = chess_move.promotion {
+            score += 90_000 + piece_value(promotion);
+        }
+        if !capture && chess_move.promotion.is_none() && ply < 64 {
+            score = if chess_move == self.killers[ply][0] {
+                80_000
+            } else if chess_move == self.killers[ply][1] {
+                79_000
+            } else if chess_move == counter_move && counter_move != Move::default() {
+                78_000
+            } else {
+                score
+            };
+        }
+        if score == 0 {
+            score = self.history[chess_move.from as usize][chess_move.to as usize];
+        }
+        score
     }
     /// Reconstructs the principal variation by walking the transposition table:
     /// repeatedly follow each position's stored best move. Stops at the first

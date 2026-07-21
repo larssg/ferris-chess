@@ -142,6 +142,10 @@ Search now reuses one move buffer per ply for alpha-beta and quiescence, filters
 pseudo-legal moves in place, and records failed quiets without a heap vector.
 Three depth-6 samples completed in 147--152 ms (up to roughly 630k NPS), again
 with identical deterministic output.
+Move ordering now caches its score by packed move before sorting, so expensive
+SEE is evaluated once per capture instead of repeatedly by the sort comparator.
+The 164,847-node depth-7 benchmark fell from 278 ms to 221--240 ms (up to
+roughly 746k NPS) with identical scores, best moves, PVs, and node counts.
 
 ## Next checkpoint
 
