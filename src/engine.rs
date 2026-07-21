@@ -9,6 +9,8 @@ use std::{
 };
 const INF: i32 = 100_000;
 const MATE: i32 = 90_000;
+const RFP_MAX_DEPTH: u8 = 6;
+const RFP_MARGIN: i32 = 80;
 #[derive(Clone, Debug)]
 pub struct SearchLimits {
     pub depth: u8,
@@ -127,6 +129,12 @@ struct Entry {
     bound: u8,
     best: Move,
     static_eval: Option<i16>,
+}
+
+#[derive(Clone, Copy)]
+struct NodeState {
+    pv: bool,
+    allow_null: bool,
 }
 
 struct TranspositionTable {
@@ -396,12 +404,42 @@ impl Engine {
             self.hashes.push(b.hash);
             let undo = b.make_move(m);
             let mut score = if index == 0 {
-                -self.negamax(b, depth - 1, -beta, -alpha, 1, true)
+                -self.negamax(
+                    b,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    1,
+                    NodeState {
+                        pv: true,
+                        allow_null: true,
+                    },
+                )
             } else {
-                -self.negamax(b, depth - 1, -alpha - 1, -alpha, 1, false)
+                -self.negamax(
+                    b,
+                    depth - 1,
+                    -alpha - 1,
+                    -alpha,
+                    1,
+                    NodeState {
+                        pv: false,
+                        allow_null: true,
+                    },
+                )
             };
             if index > 0 && score > alpha && score < beta {
-                score = -self.negamax(b, depth - 1, -beta, -alpha, 1, true);
+                score = -self.negamax(
+                    b,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    1,
+                    NodeState {
+                        pv: true,
+                        allow_null: true,
+                    },
+                );
             }
             b.unmake_move(m, undo);
             self.hashes.pop();
@@ -435,7 +473,7 @@ impl Engine {
         mut alpha: i32,
         beta: i32,
         ply: u8,
-        pv: bool,
+        node: NodeState,
     ) -> i32 {
         self.nodes += 1;
         self.seldepth = self.seldepth.max(ply);
@@ -491,17 +529,61 @@ impl Engine {
                 _ => {}
             }
         }
-        let mut moves = b.legal_moves();
-        if moves.is_empty() {
-            return if in_check { -MATE + ply as i32 } else { 0 };
-        }
-        self.order(b, &mut moves, ply as usize);
         let static_eval = if in_check {
             None
         } else {
             tt.and_then(|entry| entry.static_eval)
                 .or_else(|| i16::try_from(evaluate(b)).ok())
         };
+        if !node.pv && !in_check && depth <= RFP_MAX_DEPTH && beta.abs() < MATE - 64 {
+            let margin = RFP_MARGIN * i32::from(depth);
+            if i32::from(static_eval.unwrap()) - margin >= beta {
+                return i32::from(static_eval.unwrap()) - margin;
+            }
+        }
+        if node.allow_null
+            && !node.pv
+            && !in_check
+            && depth >= 3
+            && has_non_pawn_material(b, b.side)
+        {
+            let reduction = if depth > 10 {
+                4
+            } else if depth > 6 {
+                3
+            } else {
+                2
+            };
+            self.hashes.push(b.hash);
+            let undo = b.make_null_move();
+            let mut score = -self.negamax(
+                b,
+                depth - 1 - reduction,
+                -beta,
+                -beta + 1,
+                ply + 1,
+                NodeState {
+                    pv: false,
+                    allow_null: false,
+                },
+            );
+            b.unmake_null_move(undo);
+            self.hashes.pop();
+            if self.stopped {
+                return 0;
+            }
+            if score >= beta {
+                if score >= MATE - 64 {
+                    score = beta;
+                }
+                return score;
+            }
+        }
+        let mut moves = b.legal_moves();
+        if moves.is_empty() {
+            return if in_check { -MATE + ply as i32 } else { 0 };
+        }
+        self.order(b, &mut moves, ply as usize);
         if let Some(e) = tt
             && let Some(i) = moves.iter().position(|m| {
                 m.from == e.best.from && m.to == e.best.to && m.promotion == e.best.promotion
@@ -515,15 +597,34 @@ impl Engine {
             let capture = b.piece_at(m.to).is_some() || m.en_passant;
             self.hashes.push(b.hash);
             let undo = b.make_move(m);
-            let reduction = if depth >= 3 && i >= 4 && !pv && !capture && !in_check {
+            let reduction = if depth >= 3 && i >= 4 && !node.pv && !capture && !in_check {
                 1
             } else {
                 0
             };
-            let mut score =
-                -self.negamax(b, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1, false);
-            if score > alpha && (reduction > 0 || pv) {
-                score = -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, pv)
+            let mut score = -self.negamax(
+                b,
+                depth - 1 - reduction,
+                -alpha - 1,
+                -alpha,
+                ply + 1,
+                NodeState {
+                    pv: false,
+                    allow_null: true,
+                },
+            );
+            if score > alpha && (reduction > 0 || node.pv) {
+                score = -self.negamax(
+                    b,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    NodeState {
+                        pv: node.pv,
+                        allow_null: true,
+                    },
+                )
             }
             b.unmake_move(m, undo);
             self.hashes.pop();
@@ -686,6 +787,17 @@ fn unpack_move(packed: u16) -> Move {
         promotion,
         ..Move::default()
     }
+}
+
+fn has_non_pawn_material(board: &Board, color: crate::Color) -> bool {
+    [
+        PieceKind::Knight,
+        PieceKind::Bishop,
+        PieceKind::Rook,
+        PieceKind::Queen,
+    ]
+    .into_iter()
+    .any(|kind| board.pieces(color, kind) != 0)
 }
 
 fn score_to_tt(score: i32, ply: u8) -> i32 {

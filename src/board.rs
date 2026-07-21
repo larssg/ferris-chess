@@ -103,6 +103,13 @@ pub struct Undo {
     hash: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NullUndo {
+    side: Color,
+    en_passant: Option<u8>,
+    hash: u64,
+}
+
 impl Default for Board {
     fn default() -> Self {
         Self::startpos()
@@ -677,6 +684,24 @@ impl Board {
         self.rebuild_bitboards();
     }
 
+    pub(crate) fn make_null_move(&mut self) -> NullUndo {
+        let undo = NullUndo {
+            side: self.side,
+            en_passant: self.en_passant,
+            hash: self.hash,
+        };
+        self.side = self.side.other();
+        self.en_passant = None;
+        self.hash = self.compute_hash();
+        undo
+    }
+
+    pub(crate) fn unmake_null_move(&mut self, undo: NullUndo) {
+        self.side = undo.side;
+        self.en_passant = undo.en_passant;
+        self.hash = undo.hash;
+    }
+
     pub fn in_check(&self, color: Color) -> bool {
         self.king_square(color)
             .is_some_and(|sq| self.square_attacked(sq, color.other()))
@@ -948,6 +973,21 @@ mod tests {
                 assert_eq!(board, original, "failed to restore {chess_move} from {fen}");
             }
         }
+    }
+
+    #[test]
+    fn null_move_restores_side_en_passant_and_hash() {
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/4Pp2/8/PPPP2PP/RNBQKBNR w KQkq f6 0 3").unwrap();
+        let original = board.clone();
+        let undo = board.make_null_move();
+        assert_eq!(board.side, Color::Black);
+        assert_eq!(board.en_passant, None);
+        assert_ne!(board.hash, original.hash);
+        assert_eq!(board.halfmove, original.halfmove);
+        assert_eq!(board.fullmove, original.fullmove);
+        board.unmake_null_move(undo);
+        assert_eq!(board, original);
     }
 
     #[test]

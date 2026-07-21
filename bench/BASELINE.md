@@ -61,3 +61,18 @@ aspiration widening and root PVS, the release depth-4 benchmark became:
 The run completed in 159 ms at 296,823 NPS. Nodes fell about 39.3% from the
 evaluation/SEE checkpoint while every recorded score, best move, and PV stayed
 unchanged.
+
+## Null-move and reverse-futility checkpoint
+
+Reference-style adaptive null-move pruning and reverse futility pruning
+produced this release depth-4 benchmark:
+
+| Position | Nodes | Score | Best move |
+|---|---:|---:|---|
+| Start position | 4,198 | 0 | `g1f3` |
+| Kiwipete | 17,092 | 45 | `e2a6` |
+| Middlegame | 18,146 | 34 | `f3e5` |
+| Total | 39,436 | — | — |
+
+The run completed in 98 ms at 402,408 NPS. Nodes fell about 16.4% from the TT
+evaluation cache/PVS checkpoint with scores, best moves, and PVs unchanged.

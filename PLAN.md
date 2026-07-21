@@ -68,8 +68,11 @@ Implemented public interfaces and behavior include:
 - Static evaluations cached in the 64-byte clustered transposition table.
 - One-sided 50/200/full aspiration widening and root principal-variation
   search behavior matching the pinned reference.
+- Reverse futility pruning through depth 6 with reference margins.
+- Adaptive null-move pruning with pawn-only, check, PV, and consecutive-null
+  guards plus exact null-state restoration.
 
-At the current worktree checkpoint, all 16 Rust tests, warning-free Clippy,
+At the current worktree checkpoint, all 17 Rust tests, warning-free Clippy,
 release builds, GoChess tests, and UCI smoke tests passed.
 
 ## Recorded baseline
@@ -102,19 +105,19 @@ GoChess evaluation and SEE parity is implemented in the current worktree:
 - Passed the quality loop, release build, depth-4 benchmark, and UCI smoke test.
 
 The evaluation/SEE depth-4 checkpoint visited 77,698 total nodes. TT static
-evaluation caching and aspiration/PVS reduced that again to 47,195 nodes while
-preserving all three benchmark scores, best moves, and PVs.
+evaluation caching and aspiration/PVS reduced that to 47,195 nodes; null-move
+and reverse futility pruning reduced it again to 39,436 nodes while preserving
+all three benchmark scores, best moves, and PVs.
 
 ## Next checkpoint
 
 Port the next measured GoChess search-behavior batch:
 
-1. Null-move pruning and reverse futility pruning.
-2. Razoring, futility pruning, and late-move pruning.
-3. Logarithmic late-move reductions and internal iterative reductions.
-4. Check/extensions, SEE capture ordering, killers, history bonuses/maluses,
+1. Razoring, futility pruning, and late-move pruning.
+2. Logarithmic late-move reductions and internal iterative reductions.
+3. Check/extensions, SEE capture ordering, killers, history bonuses/maluses,
    and countermoves.
-5. Repetition semantics, adaptive time management, and opening book behavior.
+4. Repetition semantics, adaptive time management, and opening book behavior.
 
 Re-run fixed-depth differential benchmarks after each coherent batch. Require
 an SPRT non-inferiority result before superiority experiments.
