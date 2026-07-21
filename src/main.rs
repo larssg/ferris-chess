@@ -1,4 +1,4 @@
-use chess::{Board, Engine, SearchLimits};
+use chess::{Board, Color, Engine, SearchLimits};
 use std::{
     io::{self, BufRead},
     time::Duration,
@@ -20,6 +20,22 @@ fn main() {
             "ucinewgame" => {
                 board = Board::startpos();
                 engine.clear()
+            }
+            "setoption" => {
+                if let (Some(name), Some(value)) = (
+                    parts.iter().position(|p| *p == "name"),
+                    parts.iter().position(|p| *p == "value"),
+                ) {
+                    if parts
+                        .get(name + 1)
+                        .is_some_and(|p| p.eq_ignore_ascii_case("hash"))
+                    {
+                        if let Some(mb) = parts.get(value + 1).and_then(|v| v.parse::<usize>().ok())
+                        {
+                            engine.set_hash_mb(mb.clamp(1, 4096));
+                        }
+                    }
+                }
             }
             "position" => {
                 let mut i = 1;
@@ -47,6 +63,11 @@ fn main() {
             }
             "go" => {
                 let mut limits = SearchLimits::default();
+                let mut wtime: Option<u64> = None;
+                let mut btime: Option<u64> = None;
+                let mut winc = 0u64;
+                let mut binc = 0u64;
+                let mut moves_to_go = 30u64;
                 let mut i = 1;
                 while i < parts.len() {
                     match parts[i] {
@@ -64,9 +85,49 @@ fn main() {
                             i += 1;
                             limits.nodes = parts.get(i).and_then(|s| s.parse().ok())
                         }
+                        "wtime" => {
+                            i += 1;
+                            wtime = parts.get(i).and_then(|s| s.parse().ok());
+                        }
+                        "btime" => {
+                            i += 1;
+                            btime = parts.get(i).and_then(|s| s.parse().ok());
+                        }
+                        "winc" => {
+                            i += 1;
+                            winc = parts.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        }
+                        "binc" => {
+                            i += 1;
+                            binc = parts.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        }
+                        "movestogo" => {
+                            i += 1;
+                            moves_to_go = parts
+                                .get(i)
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(30)
+                                .max(1);
+                        }
                         _ => {}
                     }
                     i += 1
+                }
+                if !parts.contains(&"movetime") {
+                    if let Some(left) = if board.side == Color::White {
+                        wtime
+                    } else {
+                        btime
+                    } {
+                        let inc = if board.side == Color::White {
+                            winc
+                        } else {
+                            binc
+                        };
+                        let safe = left.saturating_sub(30);
+                        let target = safe / moves_to_go + inc * 3 / 4;
+                        limits.time = Duration::from_millis(target.clamp(20, (safe / 2).max(20)));
+                    }
                 }
                 let r = engine.search(&board, limits, |r| {
                     println!(

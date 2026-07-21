@@ -70,6 +70,12 @@ impl Engine {
         self.tt.clear();
         self.hashes.clear()
     }
+    pub fn set_hash_mb(&mut self, mb: usize) {
+        // A HashMap entry has allocator/control-byte overhead; using 32 bytes
+        // per entry keeps the requested UCI budget conservative.
+        let entries = (mb.max(1) * 1024 * 1024 / 32).max(1024);
+        self.tt = HashMap::with_capacity(entries);
+    }
     pub fn search(
         &mut self,
         b: &Board,
@@ -146,6 +152,17 @@ impl Engine {
                 best = Some(m)
             }
         }
+        if let Some(best_move) = best {
+            self.tt.insert(
+                b.hash,
+                Entry {
+                    depth,
+                    score: alpha,
+                    bound: 0,
+                    best: best_move,
+                },
+            );
+        }
         (alpha, best)
     }
     fn negamax(
@@ -158,6 +175,9 @@ impl Engine {
         pv: bool,
     ) -> i32 {
         self.nodes += 1;
+        if ply >= 63 {
+            return evaluate(b);
+        }
         if self.nodes & 2047 == 0
             && (self.start.elapsed() >= self.limit
                 || self.node_limit.is_some_and(|n| self.nodes >= n))
@@ -376,5 +396,38 @@ pub fn evaluate(b: &Board) -> i32 {
         score
     } else {
         -score
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_mate_in_one() {
+        let board = Board::from_fen("7k/5Q2/6K1/8/8/8/8/8 w - - 0 1").unwrap();
+        let mut engine = Engine::new();
+        let result = engine.search(
+            &board,
+            SearchLimits {
+                depth: 3,
+                time: Duration::from_secs(1),
+                nodes: None,
+            },
+            |_| {},
+        );
+        let mut after = board.clone();
+        after.make_move(result.best_move.unwrap());
+        assert!(after.legal_moves().is_empty());
+        assert!(after.in_check(Color::Black));
+        assert!(result.score > MATE - 10);
+    }
+
+    #[test]
+    fn evaluation_is_side_relative() {
+        let white = Board::from_fen("7k/8/8/8/8/8/4Q3/K7 w - - 0 1").unwrap();
+        let black = Board::from_fen("7k/8/8/8/8/8/4Q3/K7 b - - 0 1").unwrap();
+        assert_eq!(evaluate(&white), -evaluate(&black));
+        assert!(evaluate(&white) > 800);
     }
 }
