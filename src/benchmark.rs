@@ -5,8 +5,9 @@
 //! reference — only wall time and NPS are machine-dependent. See `README.md`
 //! and `bench/BASELINE.md` for how these numbers are used.
 
+use crate::clock::Instant;
 use crate::{Board, Engine, Move, SearchLimits};
-use std::{fs, path::Path, time::Instant};
+use std::{fs, path::Path};
 
 /// Perft positions with their expected leaf-node totals at a given depth. A
 /// mismatch is a move-generation bug, so the totals are asserted, not just printed.

@@ -17,9 +17,12 @@
 pub mod benchmark;
 pub mod board;
 pub mod book;
+pub mod clock;
 pub mod engine;
 pub mod eval;
 
 pub use board::{Board, Color, Move, Piece, PieceKind, Undo};
-pub use engine::{Engine, ScoreType, SearchHandle, SearchLimits, SearchResult, TerminationReason};
+pub use engine::{
+    Engine, ScoreType, SearchHandle, SearchLimits, SearchResult, TerminationReason, time_budget,
+};
 pub use eval::{evaluate, static_exchange_eval};

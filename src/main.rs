@@ -2,7 +2,7 @@
 //! `chess` library. The engine runs on a worker thread so the main loop can keep
 //! reading commands (notably `stop` and `ponderhit`) while a search is running.
 
-use chess::{Board, Color, Engine, SearchHandle, SearchLimits, book::book_move};
+use chess::{Board, Color, Engine, SearchHandle, SearchLimits, book::book_move, time_budget};
 use std::{
     io::{self, BufRead},
     thread::{self, JoinHandle},
@@ -54,29 +54,6 @@ fn stop_search(running: &mut Option<RunningSearch>, engine: &mut Option<Engine>)
             *engine = Some(returned);
         }
     }
-}
-
-/// Produces the iterative-deepening target and absolute deadline. Sudden-death
-/// controls assume roughly 30 moves remain and allow slightly more emergency
-/// headroom than an explicit moves-to-go control.
-fn time_budget(
-    remaining: Duration,
-    increment: Duration,
-    moves_to_go: Option<u32>,
-) -> (Duration, Duration) {
-    let overhead = Duration::from_millis(30);
-    let safe = remaining
-        .checked_sub(overhead)
-        .unwrap_or(remaining / 4)
-        .max(remaining / 4);
-    let moves = moves_to_go.unwrap_or(30).clamp(1, 30);
-    let mut soft = safe / moves + increment * 3 / 4;
-    let mut hard = soft * if moves_to_go.is_some() { 4 } else { 5 };
-    hard = hard.min(safe / 2);
-    soft = soft.min(hard);
-    hard = hard.max(Duration::from_millis(50));
-    soft = soft.max(Duration::from_millis(30)).min(hard);
-    (soft, hard)
 }
 
 fn has_starting_pieces(board: &Board) -> bool {
@@ -364,28 +341,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn increment_and_moves_to_go_increase_the_soft_budget() {
-        let remaining = Duration::from_secs(300);
-        let (sudden_death, _) = time_budget(remaining, Duration::ZERO, None);
-        let (with_increment, _) = time_budget(remaining, Duration::from_secs(3), None);
-        let (five_moves, _) = time_budget(remaining, Duration::ZERO, Some(5));
-        assert!(with_increment > sudden_death);
-        assert!(five_moves > sudden_death);
-    }
-
-    #[test]
-    fn time_budget_has_safe_floors_and_a_bounded_hard_limit() {
-        let (soft, hard) = time_budget(Duration::from_millis(100), Duration::ZERO, None);
-        assert!(soft > Duration::ZERO);
-        assert!(soft <= hard);
-        assert_eq!(hard, Duration::from_millis(50));
-
-        let remaining = Duration::from_secs(300);
-        let (_, hard) = time_budget(remaining, Duration::ZERO, None);
-        assert!(hard <= remaining / 2);
-    }
 
     #[test]
     fn setoption_parser_handles_names_and_values() {

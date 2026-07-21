@@ -361,6 +361,23 @@ impl Board {
             .find(|chess_move| self.san_without_check(*chess_move) == target)
     }
 
+    /// Renders a move as full SAN, including the trailing `+`/`#` check markers.
+    /// Intended for front-ends displaying move lists; the engine itself only
+    /// needs the marker-free form below. The move must be legal here.
+    pub fn san(&self, chess_move: Move) -> String {
+        let mut san = self.san_without_check(chess_move);
+        let mut after = self.clone();
+        after.make_move(chess_move);
+        if after.in_check(after.side) {
+            san.push(if after.legal_moves().is_empty() {
+                '#'
+            } else {
+                '+'
+            });
+        }
+        san
+    }
+
     /// Renders a move as SAN *without* the trailing `+`/`#` check markers, which
     /// is enough for [`parse_san`](Self::parse_san) to match against (it strips
     /// those markers from its input too). The bulk of the work is
@@ -1528,6 +1545,40 @@ mod tests {
             .collect::<Vec<_>>();
         moves.sort_unstable();
         moves
+    }
+
+    fn san_of(fen: &str, uci: &str) -> String {
+        let board = Board::from_fen(fen).unwrap();
+        let chess_move = board.parse_move(uci).unwrap();
+        board.san(chess_move)
+    }
+
+    #[test]
+    fn san_appends_check_and_mate_markers() {
+        // Scholar's mate delivery: 4. Qxf7#.
+        assert_eq!(
+            san_of(
+                "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
+                "h5f7"
+            ),
+            "Qxf7#"
+        );
+        // A plain check the defender can answer keeps the `+`.
+        assert_eq!(
+            san_of(
+                "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+                "f1b5"
+            ),
+            "Bb5+"
+        );
+        assert_eq!(
+            san_of("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"),
+            "O-O"
+        );
+        assert_eq!(
+            san_of("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1c1"),
+            "O-O-O"
+        );
     }
 
     #[test]

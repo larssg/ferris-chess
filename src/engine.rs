@@ -7,6 +7,7 @@
 //! score higher. `INF` sits above every real score and is used as the initial
 //! alpha/beta bound.
 
+use crate::clock::Instant;
 use crate::eval::piece_value;
 use crate::eval::{PawnCache, evaluate_cached};
 use crate::{Board, Move, PieceKind, static_exchange_eval};
@@ -15,7 +16,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 const INF: i32 = 100_000;
 /// Scores at or above `MATE - 64` denote a forced mate; the 64-ply band leaves
@@ -79,6 +80,30 @@ fn should_stop_iterating(
     .min(hard * 4 / 5);
     elapsed > effective
 }
+
+/// Produces the iterative-deepening target and absolute deadline. Sudden-death
+/// controls assume roughly 30 moves remain and allow slightly more emergency
+/// headroom than an explicit moves-to-go control.
+pub fn time_budget(
+    remaining: Duration,
+    increment: Duration,
+    moves_to_go: Option<u32>,
+) -> (Duration, Duration) {
+    let overhead = Duration::from_millis(30);
+    let safe = remaining
+        .checked_sub(overhead)
+        .unwrap_or(remaining / 4)
+        .max(remaining / 4);
+    let moves = moves_to_go.unwrap_or(30).clamp(1, 30);
+    let mut soft = safe / moves + increment * 3 / 4;
+    let mut hard = soft * if moves_to_go.is_some() { 4 } else { 5 };
+    hard = hard.min(safe / 2);
+    soft = soft.min(hard);
+    hard = hard.max(Duration::from_millis(50));
+    soft = soft.max(Duration::from_millis(30)).min(hard);
+    (soft, hard)
+}
+
 /// The stopping conditions for a search, mirroring the UCI `go` parameters. A
 /// search ends when any active limit is reached; the clock fields feed the time
 /// budget computed by the UCI adapter, and `root_moves` restricts the search to
@@ -1433,6 +1458,28 @@ fn score_from_tt(score: i32, ply: u8) -> i32 {
 mod tests {
     use super::*;
     use crate::evaluate;
+
+    #[test]
+    fn increment_and_moves_to_go_increase_the_soft_budget() {
+        let remaining = Duration::from_secs(300);
+        let (sudden_death, _) = time_budget(remaining, Duration::ZERO, None);
+        let (with_increment, _) = time_budget(remaining, Duration::from_secs(3), None);
+        let (five_moves, _) = time_budget(remaining, Duration::ZERO, Some(5));
+        assert!(with_increment > sudden_death);
+        assert!(five_moves > sudden_death);
+    }
+
+    #[test]
+    fn time_budget_has_safe_floors_and_a_bounded_hard_limit() {
+        let (soft, hard) = time_budget(Duration::from_millis(100), Duration::ZERO, None);
+        assert!(soft > Duration::ZERO);
+        assert!(soft <= hard);
+        assert_eq!(hard, Duration::from_millis(50));
+
+        let remaining = Duration::from_secs(300);
+        let (_, hard) = time_budget(remaining, Duration::ZERO, None);
+        assert!(hard <= remaining / 2);
+    }
 
     #[test]
     fn repetition_uses_same_side_and_halfmove_window() {

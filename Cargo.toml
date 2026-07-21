@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+# Native builds stay dependency-free; wasm32 only swaps in a browser-backed
+# `Instant` (std's panics on wasm32-unknown-unknown). See `src/clock.rs`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
