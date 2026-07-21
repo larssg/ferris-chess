@@ -694,7 +694,7 @@ impl Board {
     /// would miss: remove an en-passant victim, promote, shuffle the castling
     /// rook, revoke castling rights when a king or rook square is touched, set a
     /// new en-passant target after a double push, and update the clocks. The
-    /// bitboards and hash are rebuilt wholesale at the end.
+    /// mailbox, bitboards, and hash are updated together.
     pub fn make_move(&mut self, m: Move) -> Undo {
         let piece = self.squares[m.from as usize].unwrap();
         // An en-passant capture removes a pawn that sits beside `to`, not on it.
@@ -725,14 +725,18 @@ impl Board {
             } else {
                 m.to + 8
             };
-            self.squares[sq as usize] = None
+            self.remove_piece(sq);
         }
         // Move the piece, applying a promotion by swapping in the new kind.
-        self.squares[m.from as usize] = None;
-        self.squares[m.to as usize] = Some(Piece {
-            color: piece.color,
-            kind: m.promotion.unwrap_or(piece.kind),
-        });
+        self.remove_piece(m.from);
+        self.remove_piece(m.to);
+        self.place_piece(
+            m.to,
+            Piece {
+                color: piece.color,
+                kind: m.promotion.unwrap_or(piece.kind),
+            },
+        );
         if m.castle {
             // The king has already moved two squares; bring the rook to the far
             // side of it. Kingside jumps three squares, queenside four.
@@ -741,8 +745,8 @@ impl Board {
             } else {
                 (m.from - 4, m.from - 1)
             };
-            self.squares[rt as usize] = self.squares[rf as usize];
-            self.squares[rf as usize] = None
+            let rook = self.remove_piece(rf).expect("castling rook must exist");
+            self.place_piece(rt, rook);
         }
         // Moving a king or rook off its home square revokes the matching rights;
         // capturing a rook on its home square revokes the opponent's.
@@ -781,8 +785,17 @@ impl Board {
             self.fullmove += 1
         }
         self.side = self.side.other();
-        self.rebuild_bitboards();
-        self.hash = self.compute_hash();
+        // Piece keys were maintained while moving the pieces above. Finish the
+        // incremental hash update with the non-piece state that changed.
+        self.hash ^= mix64(500 + u64::from(undo.castling));
+        self.hash ^= mix64(500 + u64::from(self.castling));
+        if let Some(ep) = undo.en_passant {
+            self.hash ^= mix64(600 + u64::from(ep % 8));
+        }
+        if let Some(ep) = self.en_passant {
+            self.hash ^= mix64(600 + u64::from(ep % 8));
+        }
+        self.hash ^= mix64(700);
         undo
     }
 
@@ -792,27 +805,28 @@ impl Board {
     /// reverse.
     pub fn unmake_move(&mut self, m: Move, undo: Undo) {
         self.side = self.side.other();
-        self.squares[m.from as usize] = Some(undo.moved);
-        self.squares[m.to as usize] = None;
+        self.remove_piece(m.to);
+        self.place_piece(m.from, undo.moved);
         if m.castle {
             let (rf, rt) = if m.to > m.from {
                 (m.from + 3, m.from + 1)
             } else {
                 (m.from - 4, m.from - 1)
             };
-            self.squares[rf as usize] = self.squares[rt as usize];
-            self.squares[rt as usize] = None;
+            let rook = self
+                .remove_piece(rt)
+                .expect("castling rook must exist while unmaking");
+            self.place_piece(rf, rook);
         }
         // Restore any captured piece (its square differs from `to` for en passant).
         if let Some((square, piece)) = undo.captured {
-            self.squares[square as usize] = Some(piece);
+            self.place_piece(square, piece);
         }
         self.castling = undo.castling;
         self.en_passant = undo.en_passant;
         self.halfmove = undo.halfmove;
         self.fullmove = undo.fullmove;
         self.hash = undo.hash;
-        self.rebuild_bitboards();
     }
 
     /// Plays a null move: pass the turn without moving. Used by null-move
@@ -826,7 +840,10 @@ impl Board {
         };
         self.side = self.side.other();
         self.en_passant = None;
-        self.hash = self.compute_hash();
+        if let Some(ep) = undo.en_passant {
+            self.hash ^= mix64(600 + u64::from(ep % 8));
+        }
+        self.hash ^= mix64(700);
         undo
     }
 
@@ -998,6 +1015,26 @@ impl Board {
             }
         }
     }
+
+    /// Removes a piece from both board representations.
+    fn remove_piece(&mut self, square: u8) -> Option<Piece> {
+        let piece = self.squares[square as usize].take()?;
+        let bit = 1u64 << square;
+        self.pieces[piece_index(piece)] &= !bit;
+        self.occupancy[color_index(piece.color)] &= !bit;
+        self.hash ^= piece_hash(piece, square);
+        Some(piece)
+    }
+
+    /// Places a piece in both board representations.
+    fn place_piece(&mut self, square: u8, piece: Piece) {
+        debug_assert!(self.squares[square as usize].is_none());
+        let bit = 1u64 << square;
+        self.squares[square as usize] = Some(piece);
+        self.pieces[piece_index(piece)] |= bit;
+        self.occupancy[color_index(piece.color)] |= bit;
+        self.hash ^= piece_hash(piece, square);
+    }
 }
 
 impl FromStr for Board {
@@ -1077,6 +1114,14 @@ fn mix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
+/// The hash feature for one piece on one square.
+fn piece_hash(piece: Piece, square: u8) -> u64 {
+    mix64(
+        u64::from(square)
+            + 64 * (piece.kind as u64 + 8 * if piece.color == Color::White { 1 } else { 2 }),
+    )
+}
+
 /// Maps a color to the 0/1 index used by the `occupancy` array.
 const fn color_index(color: Color) -> usize {
     match color {
@@ -1114,6 +1159,31 @@ mod tests {
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
         )
     }
+
+    #[test]
+    fn incremental_hash_matches_full_recomputation() {
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "4k3/1P6/8/3pP3/8/8/6p1/4K3 w - d6 0 1",
+        ] {
+            let original = Board::from_fen(fen).unwrap();
+            for chess_move in original.legal_moves() {
+                let mut board = original.clone();
+                let undo = board.make_move(chess_move);
+                assert_eq!(board.hash, board.compute_hash(), "{fen}: {chess_move}");
+                board.unmake_move(chess_move, undo);
+                assert_eq!(board, original, "{fen}: {chess_move}");
+            }
+
+            let mut board = original.clone();
+            let undo = board.make_null_move();
+            assert_eq!(board.hash, board.compute_hash(), "{fen}: null move");
+            board.unmake_null_move(undo);
+            assert_eq!(board, original, "{fen}: null move");
+        }
+    }
+
     #[test]
     fn standard_perft() {
         let b = Board::startpos();

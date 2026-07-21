@@ -129,6 +129,12 @@ three scores and best moves. Correct repetition semantics and adaptive time
 management preserve that deterministic fixed-depth result.
 Opening-book parity does not affect the explicit benchmark search path.
 
+The first throughput batch replaced full mailbox-to-bitboard rebuilds and
+full-position hash recomputation after every move with incremental updates.
+The depth-6 search benchmark remains deterministic at 92,572 nodes with
+identical scores, best moves, and PVs; on the development machine its sampled
+runtime fell from 316 ms to 175 ms (roughly 293k to 529k NPS).
+
 ## Next checkpoint
 
 The first non-inferiority SPRT failed at its lower boundary after 35 games
@@ -136,8 +142,8 @@ The first non-inferiority SPRT failed at its lower boundary after 35 games
 protocol-clean, but GoChess generally searched roughly three plies deeper at
 similar move times.
 
-Profile and remove the largest search-throughput costs, starting with board
-state rebuilding, evaluation rescans, and move-list allocation. Preserve exact
+Profile and remove the remaining largest search-throughput costs, starting with
+evaluation rescans and move-list allocation. Preserve exact
 evaluation, SEE, fixed-depth scores, best moves, and deterministic node counts.
 
 Re-run fixed-depth differential benchmarks after each coherent batch. Require
