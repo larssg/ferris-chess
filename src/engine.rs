@@ -1,8 +1,5 @@
 use crate::{Board, Color, Move, PieceKind};
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 const INF: i32 = 100_000;
 const MATE: i32 = 90_000;
 #[derive(Clone, Copy, Debug)]
@@ -29,15 +26,104 @@ pub struct SearchResult {
     pub elapsed: Duration,
     pub pv: Vec<Move>,
 }
-#[derive(Clone, Copy)]
+const BOUND_EXACT: u8 = 0;
+const BOUND_LOWER: u8 = 1;
+const BOUND_UPPER: u8 = 2;
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct Slot {
+    key: u64,
+    score: i32,
+    best: u16,
+    depth: u8,
+    flags: u8,
+}
+
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(64))]
+struct Cluster {
+    slots: [Slot; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
 struct Entry {
     depth: u8,
     score: i32,
     bound: u8,
     best: Move,
 }
+
+struct TranspositionTable {
+    clusters: Vec<Cluster>,
+    generation: u8,
+}
+
+impl TranspositionTable {
+    fn with_mb(mb: usize) -> Self {
+        let bytes = mb.max(1).saturating_mul(1024 * 1024);
+        let count = (bytes / size_of::<Cluster>()).max(1);
+        Self {
+            clusters: vec![Cluster::default(); count],
+            generation: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.clusters.fill(Cluster::default());
+        self.generation = 0;
+    }
+
+    fn new_search(&mut self) {
+        self.generation = self.generation.wrapping_add(1) & 0x3f;
+    }
+
+    fn get(&self, key: u64, ply: u8) -> Option<Entry> {
+        self.clusters[key as usize % self.clusters.len()]
+            .slots
+            .iter()
+            .find(|slot| slot.key == key && slot.depth != 0)
+            .map(|slot| Entry {
+                depth: slot.depth - 1,
+                score: score_from_tt(slot.score, ply),
+                bound: slot.flags & 3,
+                best: unpack_move(slot.best),
+            })
+    }
+
+    fn store(&mut self, key: u64, entry: Entry, ply: u8) {
+        let index = key as usize % self.clusters.len();
+        let generation = self.generation;
+        let slots = &mut self.clusters[index].slots;
+        let replace = slots
+            .iter()
+            .position(|slot| slot.key == key || slot.depth == 0)
+            .unwrap_or_else(|| {
+                slots
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, slot)| {
+                        let age = generation.wrapping_sub(slot.flags >> 2) & 0x3f;
+                        i16::from(slot.depth) - i16::from(age) * 4
+                    })
+                    .map_or(0, |(index, _)| index)
+            });
+        let old = slots[replace];
+        if old.key == key && old.depth > entry.depth.saturating_add(4) && entry.bound != BOUND_EXACT
+        {
+            return;
+        }
+        slots[replace] = Slot {
+            key,
+            score: score_to_tt(entry.score, ply),
+            best: pack_move(entry.best),
+            depth: entry.depth.saturating_add(1),
+            flags: generation << 2 | entry.bound,
+        };
+    }
+}
 pub struct Engine {
-    tt: HashMap<u64, Entry>,
+    tt: TranspositionTable,
     history: [[i32; 64]; 64],
     killers: [[Move; 2]; 64],
     hashes: Vec<u64>,
@@ -55,7 +141,7 @@ impl Default for Engine {
 impl Engine {
     pub fn new() -> Self {
         Self {
-            tt: HashMap::with_capacity(1 << 20),
+            tt: TranspositionTable::with_mb(64),
             history: [[0; 64]; 64],
             killers: [[Move::default(); 2]; 64],
             hashes: Vec::new(),
@@ -71,10 +157,7 @@ impl Engine {
         self.hashes.clear()
     }
     pub fn set_hash_mb(&mut self, mb: usize) {
-        // A HashMap entry has allocator/control-byte overhead; using 32 bytes
-        // per entry keeps the requested UCI budget conservative.
-        let entries = (mb.max(1) * 1024 * 1024 / 32).max(1024);
-        self.tt = HashMap::with_capacity(entries);
+        self.tt = TranspositionTable::with_mb(mb);
     }
     pub fn search(
         &mut self,
@@ -87,6 +170,7 @@ impl Engine {
         self.limit = limits.time;
         self.node_limit = limits.nodes;
         self.stopped = false;
+        self.tt.new_search();
         let mut result = SearchResult {
             best_move: None,
             score: 0,
@@ -154,14 +238,15 @@ impl Engine {
             }
         }
         if let Some(best_move) = best {
-            self.tt.insert(
+            self.tt.store(
                 b.hash,
                 Entry {
                     depth,
                     score: alpha,
-                    bound: 0,
+                    bound: BOUND_EXACT,
                     best: best_move,
                 },
+                0,
             );
         }
         (alpha, best)
@@ -203,14 +288,14 @@ impl Engine {
         let in_check = b.in_check(b.side);
         let depth = depth.saturating_add(in_check as u8);
         let original = alpha;
-        let tt = self.tt.get(&b.hash).copied();
+        let tt = self.tt.get(b.hash, ply);
         if let Some(e) = tt
             && e.depth >= depth
         {
             match e.bound {
-                0 => return e.score,
-                1 if e.score >= beta => return e.score,
-                2 if e.score <= alpha => return e.score,
+                BOUND_EXACT => return e.score,
+                BOUND_LOWER if e.score >= beta => return e.score,
+                BOUND_UPPER if e.score <= alpha => return e.score,
                 _ => {}
             }
         }
@@ -264,13 +349,13 @@ impl Engine {
             }
         }
         let bound = if best_score <= original {
-            2
+            BOUND_UPPER
         } else if best_score >= beta {
-            1
+            BOUND_LOWER
         } else {
-            0
+            BOUND_EXACT
         };
-        self.tt.insert(
+        self.tt.store(
             b.hash,
             Entry {
                 depth,
@@ -278,6 +363,7 @@ impl Engine {
                 bound,
                 best,
             },
+            ply,
         );
         best_score
     }
@@ -342,7 +428,9 @@ impl Engine {
         let mut b = b.clone();
         let mut pv = vec![];
         for _ in 0..depth {
-            let Some(e) = self.tt.get(&b.hash) else { break };
+            let Some(e) = self.tt.get(b.hash, pv.len() as u8) else {
+                break;
+            };
             let Some(m) = b.legal_moves().into_iter().find(|m| {
                 m.from == e.best.from && m.to == e.best.to && m.promotion == e.best.promotion
             }) else {
@@ -354,6 +442,55 @@ impl Engine {
         pv
     }
 }
+
+fn pack_move(chess_move: Move) -> u16 {
+    let promotion = match chess_move.promotion {
+        None => 0,
+        Some(PieceKind::Knight) => 1,
+        Some(PieceKind::Bishop) => 2,
+        Some(PieceKind::Rook) => 3,
+        Some(PieceKind::Queen) => 4,
+        Some(PieceKind::Pawn | PieceKind::King) => 0,
+    };
+    u16::from(chess_move.from) | u16::from(chess_move.to) << 6 | promotion << 12
+}
+
+fn unpack_move(packed: u16) -> Move {
+    let promotion = match packed >> 12 & 7 {
+        1 => Some(PieceKind::Knight),
+        2 => Some(PieceKind::Bishop),
+        3 => Some(PieceKind::Rook),
+        4 => Some(PieceKind::Queen),
+        _ => None,
+    };
+    Move {
+        from: (packed & 63) as u8,
+        to: (packed >> 6 & 63) as u8,
+        promotion,
+        ..Move::default()
+    }
+}
+
+fn score_to_tt(score: i32, ply: u8) -> i32 {
+    if score >= MATE - 64 {
+        score + i32::from(ply)
+    } else if score <= -MATE + 64 {
+        score - i32::from(ply)
+    } else {
+        score
+    }
+}
+
+fn score_from_tt(score: i32, ply: u8) -> i32 {
+    if score >= MATE - 64 {
+        score - i32::from(ply)
+    } else if score <= -MATE + 64 {
+        score + i32::from(ply)
+    } else {
+        score
+    }
+}
+
 fn value(k: PieceKind) -> i32 {
     match k {
         PieceKind::Pawn => 100,
@@ -428,5 +565,38 @@ mod tests {
         let black = Board::from_fen("7k/8/8/8/8/8/4Q3/K7 b - - 0 1").unwrap();
         assert_eq!(evaluate(&white), -evaluate(&black));
         assert!(evaluate(&white) > 800);
+    }
+
+    #[test]
+    fn tt_cluster_is_one_cache_line() {
+        assert_eq!(size_of::<Slot>(), 16);
+        assert_eq!(size_of::<Cluster>(), 64);
+        assert_eq!(align_of::<Cluster>(), 64);
+    }
+
+    #[test]
+    fn tt_preserves_moves_and_normalizes_mates() {
+        let chess_move = Move {
+            from: 48,
+            to: 56,
+            promotion: Some(PieceKind::Knight),
+            ..Move::default()
+        };
+        assert_eq!(unpack_move(pack_move(chess_move)), chess_move);
+
+        let mut table = TranspositionTable::with_mb(1);
+        table.store(
+            42,
+            Entry {
+                depth: 9,
+                score: MATE - 7,
+                bound: BOUND_EXACT,
+                best: chess_move,
+            },
+            7,
+        );
+        let entry = table.get(42, 3).unwrap();
+        assert_eq!(entry.score, MATE - 3);
+        assert_eq!(entry.best, chess_move);
     }
 }
