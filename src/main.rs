@@ -25,16 +25,12 @@ fn main() {
                 if let (Some(name), Some(value)) = (
                     parts.iter().position(|p| *p == "name"),
                     parts.iter().position(|p| *p == "value"),
-                ) {
-                    if parts
-                        .get(name + 1)
-                        .is_some_and(|p| p.eq_ignore_ascii_case("hash"))
-                    {
-                        if let Some(mb) = parts.get(value + 1).and_then(|v| v.parse::<usize>().ok())
-                        {
-                            engine.set_hash_mb(mb.clamp(1, 4096));
-                        }
-                    }
+                ) && parts
+                    .get(name + 1)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("hash"))
+                    && let Some(mb) = parts.get(value + 1).and_then(|v| v.parse::<usize>().ok())
+                {
+                    engine.set_hash_mb(mb.clamp(1, 4096));
                 }
             }
             "position" => {
@@ -56,7 +52,7 @@ fn main() {
                 if parts.get(i) == Some(&"moves") {
                     for s in &parts[i + 1..] {
                         if let Some(m) = board.parse_move(s) {
-                            board.make_move(m)
+                            board.make_move(m);
                         }
                     }
                 }
@@ -113,21 +109,21 @@ fn main() {
                     }
                     i += 1
                 }
-                if !parts.contains(&"movetime") {
-                    if let Some(left) = if board.side == Color::White {
+                if !parts.contains(&"movetime")
+                    && let Some(left) = if board.side == Color::White {
                         wtime
                     } else {
                         btime
-                    } {
-                        let inc = if board.side == Color::White {
-                            winc
-                        } else {
-                            binc
-                        };
-                        let safe = left.saturating_sub(30);
-                        let target = safe / moves_to_go + inc * 3 / 4;
-                        limits.time = Duration::from_millis(target.clamp(20, (safe / 2).max(20)));
                     }
+                {
+                    let inc = if board.side == Color::White {
+                        winc
+                    } else {
+                        binc
+                    };
+                    let safe = left.saturating_sub(30);
+                    let target = safe / moves_to_go + inc * 3 / 4;
+                    limits.time = Duration::from_millis(target.clamp(20, (safe / 2).max(20)));
                 }
                 let r = engine.search(&board, limits, |r| {
                     println!(

@@ -100,6 +100,7 @@ impl Engine {
             return result;
         }
         result.best_move = Some(legal[0]);
+        let mut board = b.clone();
         for depth in 1..=limits.depth {
             let (mut alpha, mut beta) = if depth > 3 {
                 (result.score - 40, result.score + 40)
@@ -107,7 +108,7 @@ impl Engine {
                 (-INF, INF)
             };
             loop {
-                let (score, best) = self.root(b, depth, alpha, beta);
+                let (score, best) = self.root(&mut board, depth, alpha, beta);
                 if self.stopped {
                     return result;
                 }
@@ -134,15 +135,15 @@ impl Engine {
         }
         result
     }
-    fn root(&mut self, b: &Board, depth: u8, mut alpha: i32, beta: i32) -> (i32, Option<Move>) {
+    fn root(&mut self, b: &mut Board, depth: u8, mut alpha: i32, beta: i32) -> (i32, Option<Move>) {
         let mut moves = b.legal_moves();
         self.order(b, &mut moves, 0);
         let mut best = None;
         for m in moves {
-            let mut child = b.clone();
-            child.make_move(m);
             self.hashes.push(b.hash);
-            let score = -self.negamax(&child, depth - 1, -beta, -alpha, 1, true);
+            let undo = b.make_move(m);
+            let score = -self.negamax(b, depth - 1, -beta, -alpha, 1, true);
+            b.unmake_move(m, undo);
             self.hashes.pop();
             if self.stopped {
                 break;
@@ -167,7 +168,7 @@ impl Engine {
     }
     fn negamax(
         &mut self,
-        b: &Board,
+        b: &mut Board,
         depth: u8,
         mut alpha: i32,
         beta: i32,
@@ -203,14 +204,14 @@ impl Engine {
         let depth = depth.saturating_add(in_check as u8);
         let original = alpha;
         let tt = self.tt.get(&b.hash).copied();
-        if let Some(e) = tt {
-            if e.depth >= depth {
-                match e.bound {
-                    0 => return e.score,
-                    1 if e.score >= beta => return e.score,
-                    2 if e.score <= alpha => return e.score,
-                    _ => {}
-                }
+        if let Some(e) = tt
+            && e.depth >= depth
+        {
+            match e.bound {
+                0 => return e.score,
+                1 if e.score >= beta => return e.score,
+                2 if e.score <= alpha => return e.score,
+                _ => {}
             }
         }
         let mut moves = b.legal_moves();
@@ -218,36 +219,30 @@ impl Engine {
             return if in_check { -MATE + ply as i32 } else { 0 };
         }
         self.order(b, &mut moves, ply as usize);
-        if let Some(e) = tt {
-            if let Some(i) = moves.iter().position(|m| {
+        if let Some(e) = tt
+            && let Some(i) = moves.iter().position(|m| {
                 m.from == e.best.from && m.to == e.best.to && m.promotion == e.best.promotion
-            }) {
-                moves.swap(0, i)
-            }
+            })
+        {
+            moves.swap(0, i)
         }
         let mut best = Move::default();
         let mut best_score = -INF;
         for (i, m) in moves.into_iter().enumerate() {
-            let capture = b.squares[m.to as usize].is_some() || m.en_passant;
-            let mut child = b.clone();
-            child.make_move(m);
+            let capture = b.piece_at(m.to).is_some() || m.en_passant;
             self.hashes.push(b.hash);
+            let undo = b.make_move(m);
             let reduction = if depth >= 3 && i >= 4 && !pv && !capture && !in_check {
                 1
             } else {
                 0
             };
-            let mut score = -self.negamax(
-                &child,
-                depth - 1 - reduction,
-                -alpha - 1,
-                -alpha,
-                ply + 1,
-                false,
-            );
+            let mut score =
+                -self.negamax(b, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1, false);
             if score > alpha && (reduction > 0 || pv) {
-                score = -self.negamax(&child, depth - 1, -beta, -alpha, ply + 1, pv)
+                score = -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, pv)
             }
+            b.unmake_move(m, undo);
             self.hashes.pop();
             if self.stopped {
                 return 0;
@@ -286,7 +281,7 @@ impl Engine {
         );
         best_score
     }
-    fn qsearch(&mut self, b: &Board, mut alpha: i32, beta: i32, ply: u8) -> i32 {
+    fn qsearch(&mut self, b: &mut Board, mut alpha: i32, beta: i32, ply: u8) -> i32 {
         self.nodes += 1;
         if ply >= 63 {
             return evaluate(b);
@@ -311,14 +306,14 @@ impl Engine {
         }
         for m in moves {
             if !in_check {
-                let gain = b.squares[m.to as usize].map_or(100, |p| value(p.kind));
+                let gain = b.piece_at(m.to).map_or(100, |p| value(p.kind));
                 if stand + gain + 200 < alpha {
                     continue;
                 }
             }
-            let mut c = b.clone();
-            c.make_move(m);
-            let score = -self.qsearch(&c, -beta, -alpha, ply + 1);
+            let undo = b.make_move(m);
+            let score = -self.qsearch(b, -beta, -alpha, ply + 1);
+            b.unmake_move(m, undo);
             if score >= beta {
                 return score;
             }
@@ -330,8 +325,8 @@ impl Engine {
     }
     fn order(&self, b: &Board, moves: &mut [Move], ply: usize) {
         moves.sort_unstable_by_key(|m| {
-            std::cmp::Reverse(if let Some(p) = b.squares[m.to as usize] {
-                100_000 + 10 * value(p.kind) - value(b.squares[m.from as usize].unwrap().kind)
+            std::cmp::Reverse(if let Some(p) = b.piece_at(m.to) {
+                100_000 + 10 * value(p.kind) - value(b.piece_at(m.from).unwrap().kind)
             } else if m.promotion.is_some() {
                 90_000
             } else if ply < 64 && *m == self.killers[ply][0] {
@@ -354,7 +349,7 @@ impl Engine {
                 break;
             };
             pv.push(m);
-            b.make_move(m)
+            b.make_move(m);
         }
         pv
     }
@@ -373,9 +368,13 @@ const PST: [[i16; 64]; 6] = include!("pst.in");
 pub fn evaluate(b: &Board) -> i32 {
     let mut score = 0;
     let mut bishops = [0; 2];
-    for (sq, p) in b.squares.iter().enumerate() {
-        let Some(p) = p else { continue };
-        let idx = if p.color == Color::White { sq } else { sq ^ 56 };
+    for sq in 0..64 {
+        let Some(p) = b.piece_at(sq) else { continue };
+        let idx = if p.color == Color::White {
+            sq as usize
+        } else {
+            (sq ^ 56) as usize
+        };
         let v = value(p.kind) + PST[p.kind as usize - 1][idx] as i32;
         if p.color == Color::White {
             score += v

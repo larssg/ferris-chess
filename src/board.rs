@@ -59,15 +59,28 @@ impl fmt::Display for Move {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Board {
-    pub squares: [Option<Piece>; 64],
+    squares: [Option<Piece>; 64],
+    pieces: [u64; 12],
+    occupancy: [u64; 2],
     pub side: Color,
     pub castling: u8,
     pub en_passant: Option<u8>,
     pub halfmove: u16,
     pub fullmove: u16,
     pub hash: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Undo {
+    captured: Option<(u8, Piece)>,
+    moved: Piece,
+    castling: u8,
+    en_passant: Option<u8>,
+    halfmove: u16,
+    fullmove: u16,
+    hash: u64,
 }
 
 impl Default for Board {
@@ -159,6 +172,8 @@ impl Board {
             .map_err(|_| "invalid fullmove number")?;
         let mut b = Self {
             squares,
+            pieces: [0; 12],
+            occupancy: [0; 2],
             side,
             castling,
             en_passant,
@@ -166,6 +181,7 @@ impl Board {
             fullmove,
             hash: 0,
         };
+        b.rebuild_bitboards();
         b.hash = b.compute_hash();
         Ok(b)
     }
@@ -246,15 +262,37 @@ impl Board {
         })
     }
 
+    pub fn piece_at(&self, square: u8) -> Option<Piece> {
+        self.squares.get(square as usize).copied().flatten()
+    }
+
+    pub fn pieces(&self, color: Color, kind: PieceKind) -> u64 {
+        self.pieces[piece_index(Piece { color, kind })]
+    }
+
+    pub fn occupancy(&self, color: Color) -> u64 {
+        self.occupancy[color_index(color)]
+    }
+
+    pub fn occupied(&self) -> u64 {
+        self.occupancy[0] | self.occupancy[1]
+    }
+
+    pub fn generate_legal_moves(&self, out: &mut Vec<Move>) {
+        out.clear();
+        let mut board = self.clone();
+        for m in self.pseudo_moves(false) {
+            let undo = board.make_move(m);
+            if !board.in_check(self.side) {
+                out.push(m);
+            }
+            board.unmake_move(m, undo);
+        }
+    }
     pub fn legal_moves(&self) -> Vec<Move> {
-        self.pseudo_moves(false)
-            .into_iter()
-            .filter(|m| {
-                let mut b = self.clone();
-                b.make_move(*m);
-                !b.in_check(self.side)
-            })
-            .collect()
+        let mut moves = Vec::with_capacity(48);
+        self.generate_legal_moves(&mut moves);
+        moves
     }
     pub fn legal_captures(&self) -> Vec<Move> {
         self.pseudo_moves(true)
@@ -455,8 +493,26 @@ impl Board {
         out
     }
 
-    pub fn make_move(&mut self, m: Move) {
+    pub fn make_move(&mut self, m: Move) -> Undo {
         let piece = self.squares[m.from as usize].unwrap();
+        let captured_square = if m.en_passant {
+            if piece.color == Color::White {
+                m.to - 8
+            } else {
+                m.to + 8
+            }
+        } else {
+            m.to
+        };
+        let undo = Undo {
+            captured: self.squares[captured_square as usize].map(|p| (captured_square, p)),
+            moved: piece,
+            castling: self.castling,
+            en_passant: self.en_passant,
+            halfmove: self.halfmove,
+            fullmove: self.fullmove,
+            hash: self.hash,
+        };
         let capture = self.squares[m.to as usize].is_some() || m.en_passant;
         self.en_passant = None;
         if m.en_passant {
@@ -513,7 +569,33 @@ impl Board {
             self.fullmove += 1
         }
         self.side = self.side.other();
-        self.hash = self.compute_hash()
+        self.rebuild_bitboards();
+        self.hash = self.compute_hash();
+        undo
+    }
+
+    pub fn unmake_move(&mut self, m: Move, undo: Undo) {
+        self.side = self.side.other();
+        self.squares[m.from as usize] = Some(undo.moved);
+        self.squares[m.to as usize] = None;
+        if m.castle {
+            let (rf, rt) = if m.to > m.from {
+                (m.from + 3, m.from + 1)
+            } else {
+                (m.from - 4, m.from - 1)
+            };
+            self.squares[rf as usize] = self.squares[rt as usize];
+            self.squares[rt as usize] = None;
+        }
+        if let Some((square, piece)) = undo.captured {
+            self.squares[square as usize] = Some(piece);
+        }
+        self.castling = undo.castling;
+        self.en_passant = undo.en_passant;
+        self.halfmove = undo.halfmove;
+        self.fullmove = undo.fullmove;
+        self.hash = undo.hash;
+        self.rebuild_bitboards();
     }
 
     pub fn in_check(&self, color: Color) -> bool {
@@ -648,6 +730,18 @@ impl Board {
         }
         h
     }
+
+    fn rebuild_bitboards(&mut self) {
+        self.pieces = [0; 12];
+        self.occupancy = [0; 2];
+        for (square, piece) in self.squares.iter().copied().enumerate() {
+            if let Some(piece) = piece {
+                let bit = 1u64 << square;
+                self.pieces[piece_index(piece)] |= bit;
+                self.occupancy[color_index(piece.color)] |= bit;
+            }
+        }
+    }
 }
 
 impl FromStr for Board {
@@ -717,6 +811,17 @@ fn mix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
+const fn color_index(color: Color) -> usize {
+    match color {
+        Color::White => 0,
+        Color::Black => 1,
+    }
+}
+
+const fn piece_index(piece: Piece) -> usize {
+    color_index(piece.color) * 6 + piece.kind as usize - 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,9 +855,38 @@ mod tests {
         let mut b = Board::startpos();
         for s in ["e2e4", "a7a6", "e4e5", "d7d5", "e5d6"] {
             let m = b.parse_move(s).unwrap();
-            b.make_move(m)
+            b.make_move(m);
         }
         assert!(b.squares[35].is_none());
         assert!(b.squares[43].is_some())
+    }
+
+    #[test]
+    fn make_unmake_restores_every_root_move() {
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 7 19",
+            "4k3/P6p/8/3pP3/8/8/7P/4K3 w - d6 31 72",
+        ] {
+            let original = Board::from_fen(fen).unwrap();
+            let mut board = original.clone();
+            for chess_move in original.legal_moves() {
+                let undo = board.make_move(chess_move);
+                board.unmake_move(chess_move, undo);
+                assert_eq!(board, original, "failed to restore {chess_move} from {fen}");
+            }
+        }
+    }
+
+    #[test]
+    fn bitboards_match_square_inspection() {
+        let board = Board::startpos();
+        assert_eq!(board.occupancy(Color::White).count_ones(), 16);
+        assert_eq!(board.occupancy(Color::Black).count_ones(), 16);
+        assert_eq!(
+            board.pieces(Color::White, PieceKind::Pawn),
+            0x0000_0000_0000_ff00
+        );
+        assert_eq!(board.occupied(), 0xffff_0000_0000_ffff);
     }
 }
