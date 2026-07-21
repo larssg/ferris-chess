@@ -4,6 +4,9 @@ A dependency-free UCI chess engine written in Rust, modeled after the sibling
 GoChess project. The engine is currently a compact, playable baseline with a
 complete legal chess core and classical alpha-beta search.
 
+**▶ Play it in your browser: <https://larssg.github.io/ferris-chess/>** — the web
+GUI, built and deployed from `main` on every change by GitHub Actions.
+
 ## Features
 
 - Legal move generation including castling, en passant, and all promotions
@@ -53,7 +56,9 @@ cd gui && trunk serve --release         # or serve it locally
 
 The web build needs [trunk](https://trunkrs.dev) and the
 `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`);
-`gui/dist/` is fully static and can be hosted anywhere (e.g. GitHub Pages).
+`gui/dist/` is fully static and can be hosted anywhere. This repository
+publishes it to GitHub Pages at <https://larssg.github.io/ferris-chess/> via
+`.github/workflows/deploy-gui.yml`.
 In the browser the search runs in bounded main-thread slices, so the page
 stays responsive while the engine thinks.
 
