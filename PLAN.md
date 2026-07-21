@@ -204,14 +204,19 @@ WAC depth 5.
 The first non-inferiority SPRT failed at its lower boundary after 35 games
 (1–24–10, estimated -273.7 +/- 116.9 Elo, LLR -3.01). The match was
 protocol-clean, but GoChess generally searched roughly three plies deeper at
-similar move times.
+similar move times. Six throughput batches (see the checkpoint narrative
+above) then raised deterministic fixed-depth throughput from roughly 1.29M to
+3.20M NPS without changing any search result.
 
-Profile the remaining search-throughput costs and improve the largest verified
-hotspot. Preserve exact evaluation, SEE, fixed-depth scores, best moves, and
-deterministic node counts.
+The second SPRT, run 2026-07-21 under the identical protocol, reached its
+*upper* boundary after 75 games: 41–9–25 (71.6%), estimated +158.4 +/- 68.2
+Elo, LLR 2.96 against bounds -2.94/+2.94 — H1 accepted, no crashes, illegal
+moves, or time forfeits. The `elo0=0 elo1=20` gate is passed; details in
+`bench/BASELINE.md`.
 
-Re-run fixed-depth differential benchmarks after each coherent batch. Require
-an SPRT non-inferiority result before superiority experiments.
+With parity exceeded, remaining work moves to the superiority experiments and
+finalization milestones below. Keep every experiment in an isolated commit and
+retain only changes that hold up in their own match results.
 
 ## Remaining milestones
 

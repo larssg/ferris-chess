@@ -112,3 +112,25 @@ FerrisChess scored 25.0% as White and 8.8% as Black. The PGN showed no engine
 crashes, illegal moves, or time forfeits. GoChess generally reached roughly
 three more plies at similar move times, making search throughput and avoidable
 per-node work the next measured parity target.
+
+## Second SPRT, after the throughput work
+
+Run on 2026-07-21 with the identical protocol, after six search-throughput
+batches (blocker-cut ray tables for SEE and attack detection, the incremental
+material/piece-square accumulator, the exact pawn-structure cache, bitboard
+move generation, and the pin-aware legality filter) raised deterministic
+fixed-depth throughput from roughly 1.29M to 3.20M NPS without changing any
+node count, score, best move, or PV. The sequential test reached its upper
+boundary after 75 games:
+
+```text
+FerrisChess vs GoChess: 41 wins, 9 losses, 25 draws (71.6%)
+Elo difference: +158.4 +/- 68.2, LOS: 100.0%, draw ratio 33.3%
+SPRT: llr 2.96, lower bound -2.94, upper bound 2.94
+Result: H1 accepted; the elo0=0/elo1=20 gate passed
+```
+
+FerrisChess won 22 games with White (4 losses) and 19 with Black (5 losses).
+The PGN showed no engine crashes, illegal moves, or time forfeits; every
+decisive game ended by adjudication. The parity-and-superiority gate defined
+in `PLAN.md` is therefore passed.
