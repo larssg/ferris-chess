@@ -6,8 +6,11 @@
 
 mod app;
 mod board_widget;
+mod clock;
 mod engine_driver;
 mod game;
+mod input;
+mod movelist;
 mod pieces;
 mod setup;
 

@@ -2,10 +2,13 @@
 //! UI and the engine worker, and the surrounding panels.
 
 use crate::board_widget::BoardUi;
+use crate::clock::show_clocks;
 use crate::engine_driver::{EngineDriver, EngineEvent};
 use crate::game::GameState;
+use crate::input::MoveInput;
+use crate::movelist::show_move_list;
 use crate::setup::{GameConfig, SetupState, resolve_side};
-use chess::{Color, SearchLimits, SearchResult, book, time_budget};
+use chess::{Color, ScoreType, SearchLimits, SearchResult, book, time_budget};
 use std::time::Duration;
 
 pub struct ChessApp {
@@ -15,9 +18,18 @@ pub struct ChessApp {
     config: Option<GameConfig>,
     engine: EngineDriver,
     board_ui: BoardUi,
-    /// Latest search progress plus the side the engine was thinking for,
-    /// needed to show scores from White's point of view.
-    latest_info: Option<(Color, SearchResult)>,
+    move_input: MoveInput,
+    latest_info: Option<SearchDisplay>,
+}
+
+/// Search progress pre-rendered for display. Built the moment an info event
+/// arrives, while the board still holds the position that was searched —
+/// afterwards the PV could no longer be replayed into SAN.
+struct SearchDisplay {
+    summary: String,
+    pv: String,
+    /// White's expected share of the point, for the eval bar.
+    white_share: f32,
 }
 
 impl ChessApp {
@@ -28,6 +40,7 @@ impl ChessApp {
             config: None,
             engine: EngineDriver::new(),
             board_ui: BoardUi::new(false),
+            move_input: MoveInput::default(),
             latest_info: None,
         }
     }
@@ -38,6 +51,7 @@ impl ChessApp {
         self.game = Some(GameState::new(human, config.time_control, config.use_book));
         self.config = Some(config);
         self.board_ui = BoardUi::new(human == Color::Black);
+        self.move_input = MoveInput::default();
         self.latest_info = None;
     }
 
@@ -57,6 +71,7 @@ impl ChessApp {
             game,
             engine,
             board_ui,
+            move_input,
             latest_info,
             ..
         } = self;
@@ -65,8 +80,7 @@ impl ChessApp {
         for event in engine.poll() {
             match event {
                 EngineEvent::Info(result) => {
-                    let pov = game.human.other();
-                    *latest_info = Some((pov, result));
+                    *latest_info = Some(build_search_display(game, &result));
                 }
                 EngineEvent::BestMove(Some(chess_move)) => game.play_move(chess_move, engine),
                 // Only reachable if the game ended while the search wound
@@ -81,15 +95,28 @@ impl ChessApp {
 
         let mut back_to_setup = false;
         let mut rematch = false;
+        let mut input_focused = false;
 
         egui::Panel::right("side_panel")
-            .min_size(240.0)
+            .min_size(260.0)
             .show(ui, |ui| {
                 ui.add_space(8.0);
                 show_clocks(ui, game);
                 ui.separator();
                 show_turn_banner(ui, game, engine.searching());
-                show_search_info(ui, latest_info.as_ref());
+                if let Some(info) = latest_info.as_ref() {
+                    ui.label(egui::RichText::new(&info.summary).monospace().small());
+                    ui.add(egui::Label::new(egui::RichText::new(&info.pv).weak().small()).wrap());
+                }
+                ui.separator();
+                let human_turn = !game.status.is_over() && game.board.side == game.human;
+                let (typed, focused) = move_input.show(ui, &game.board, human_turn);
+                input_focused = focused;
+                if let Some(chess_move) = typed {
+                    game.play_move(chess_move, engine);
+                }
+                ui.add_space(4.0);
+                show_move_list(ui, &game.sans);
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("New game").clicked() {
@@ -103,13 +130,24 @@ impl ChessApp {
                         board_ui.flipped = !board_ui.flipped;
                     }
                 });
+                ui.add_space(8.0);
             });
 
+        let white_share = latest_info.as_ref().map_or(0.5, |info| info.white_share);
         egui::CentralPanel::default().show(ui, |ui| {
             let interactive = !game.status.is_over() && game.board.side == game.human;
-            ui.centered_and_justified(|ui| {
+            ui.horizontal_centered(|ui| {
+                let bar_width = 16.0;
+                let bar_height = (ui
+                    .available_height()
+                    .min(ui.available_width() - bar_width - ui.spacing().item_spacing.x)
+                    / 8.0)
+                    .floor()
+                    .max(24.0)
+                    * 8.0;
+                draw_eval_bar(ui, egui::Vec2::new(bar_width, bar_height), white_share);
                 if let Some(chess_move) =
-                    board_ui.show(ui, &game.board, game.last_move, interactive)
+                    board_ui.show(ui, &game.board, game.last_move, interactive, !input_focused)
                 {
                     game.play_move(chess_move, engine);
                 }
@@ -122,7 +160,8 @@ impl ChessApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ui.ctx(), |ui| {
-                    ui.label(game.status.describe(game.human));
+                    ui.label(egui::RichText::new(game.status.describe(game.human)).heading());
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Rematch").clicked() {
                             rematch = true;
@@ -180,18 +219,6 @@ fn start_engine_turn_if_due(game: &mut GameState, engine: &mut EngineDriver) {
     engine.search(game.board.clone(), limits);
 }
 
-fn show_clocks(ui: &mut egui::Ui, game: &GameState) {
-    let engine_side = game.human.other();
-    for (label, color) in [("Engine", engine_side), ("You", game.human)] {
-        let remaining = game.remaining(color);
-        let ticking = !game.status.is_over() && game.board.side == color;
-        let text = egui::RichText::new(format!("{label}  {}", format_clock(remaining)))
-            .monospace()
-            .size(20.0);
-        ui.label(if ticking { text.strong() } else { text.weak() });
-    }
-}
-
 fn show_turn_banner(ui: &mut egui::Ui, game: &GameState, searching: bool) {
     let text = if game.status.is_over() {
         game.status.describe(game.human)
@@ -205,24 +232,74 @@ fn show_turn_banner(ui: &mut egui::Ui, game: &GameState, searching: bool) {
     ui.label(egui::RichText::new(text).heading());
 }
 
-fn show_search_info(ui: &mut egui::Ui, latest: Option<&(Color, SearchResult)>) {
-    let Some((pov, info)) = latest else { return };
-    let white_score = if *pov == Color::White {
+/// Renders one search info event into display strings. Scores arrive from
+/// the side-to-move's perspective and are flipped to White's point of view.
+fn build_search_display(game: &GameState, info: &SearchResult) -> SearchDisplay {
+    let white_score = if game.board.side == Color::White {
         info.score
     } else {
         -info.score
     };
-    let score_text = match info.score_type {
-        chess::ScoreType::Centipawn => format!("{:+.2}", f64::from(white_score) / 100.0),
-        chess::ScoreType::Mate => format!("mate {}", white_score),
+    let (score_text, white_share) = match info.score_type {
+        ScoreType::Centipawn => (
+            format!("{:+.2}", f64::from(white_score) / 100.0),
+            expected_score(white_score),
+        ),
+        ScoreType::Mate => {
+            let moves_to_mate = (chess::engine::MATE - info.score.abs() + 1) / 2;
+            let signed = if white_score > 0 {
+                moves_to_mate
+            } else {
+                -moves_to_mate
+            };
+            (
+                format!("#{signed}"),
+                if white_score > 0 { 1.0 } else { 0.0 },
+            )
+        }
     };
-    ui.label(format!(
-        "depth {}  score {score_text}  nodes {}",
-        info.depth, info.nodes
-    ));
+    let summary = format!(
+        "d{}/{}  {score_text}  {}kn  {}kn/s",
+        info.depth,
+        info.seldepth,
+        info.nodes / 1000,
+        info.nps / 1000,
+    );
+    SearchDisplay {
+        summary,
+        pv: pv_to_san(game, &info.pv),
+        white_share,
+    }
 }
 
-fn format_clock(remaining: Duration) -> String {
-    let total = remaining.as_secs();
-    format!("{}:{:02}", total / 60, total % 60)
+/// The logistic curve commonly used to map centipawns to an expected score.
+fn expected_score(white_centipawns: i32) -> f32 {
+    1.0 / (1.0 + 10f32.powf(-white_centipawns as f32 / 400.0))
+}
+
+/// Replays the PV on a scratch board to render it in SAN. Stops early if a
+/// stale transposition-table tail turns out not to be legal.
+fn pv_to_san(game: &GameState, pv: &[chess::Move]) -> String {
+    let mut board = game.board.clone();
+    let mut rendered = Vec::with_capacity(pv.len());
+    for chess_move in pv {
+        let Some(verified) = board.parse_move(&chess_move.to_string()) else {
+            break;
+        };
+        rendered.push(board.san(verified));
+        board.make_move(verified);
+    }
+    rendered.join(" ")
+}
+
+fn draw_eval_bar(ui: &mut egui::Ui, size: egui::Vec2, white_share: f32) {
+    let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
+    let rect = response.rect;
+    painter.rect_filled(rect, 3.0, egui::Color32::from_gray(35));
+    let share = white_share.clamp(0.0, 1.0);
+    let white_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.bottom() - rect.height() * share),
+        rect.right_bottom(),
+    );
+    painter.rect_filled(white_rect, 3.0, egui::Color32::from_gray(230));
 }

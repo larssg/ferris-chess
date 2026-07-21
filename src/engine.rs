@@ -21,7 +21,8 @@ use std::{
 const INF: i32 = 100_000;
 /// Scores at or above `MATE - 64` denote a forced mate; the 64-ply band leaves
 /// room to encode "mate in N" without colliding with ordinary evaluations.
-const MATE: i32 = 90_000;
+/// Public so front-ends can turn a mate score back into "mate in N".
+pub const MATE: i32 = 90_000;
 /// Reverse futility pruning applies only in shallow nodes...
 const RFP_MAX_DEPTH: u8 = 6;
 /// ...and requires the static eval to clear beta by this much per remaining ply.

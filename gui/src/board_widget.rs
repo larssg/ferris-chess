@@ -14,6 +14,14 @@ const LAST_MOVE_TINT: Color32 = Color32::from_rgba_premultiplied(120, 150, 15, 9
 const SELECTED_TINT: Color32 = Color32::from_rgba_premultiplied(20, 100, 40, 90);
 const CHECK_TINT: Color32 = Color32::from_rgba_premultiplied(150, 20, 20, 90);
 const HINT_COLOR: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 45);
+const CURSOR_COLOR: Color32 = Color32::from_rgb(70, 130, 200);
+
+const PROMOTION_CHOICES: [PieceKind; 4] = [
+    PieceKind::Queen,
+    PieceKind::Rook,
+    PieceKind::Bishop,
+    PieceKind::Knight,
+];
 
 pub struct BoardUi {
     pub flipped: bool,
@@ -21,6 +29,10 @@ pub struct BoardUi {
     dragging: bool,
     /// A from/to pair waiting on the promotion picker.
     pending_promotion: Option<(u8, u8)>,
+    /// The arrow-key square cursor; appears on first arrow press.
+    cursor: Option<u8>,
+    /// Which of [`PROMOTION_CHOICES`] the keyboard has highlighted.
+    promo_index: usize,
 }
 
 impl BoardUi {
@@ -30,6 +42,8 @@ impl BoardUi {
             selected: None,
             dragging: false,
             pending_promotion: None,
+            cursor: None,
+            promo_index: 0,
         }
     }
 
@@ -37,15 +51,19 @@ impl BoardUi {
         self.selected = None;
         self.dragging = false;
         self.pending_promotion = None;
+        self.cursor = None;
+        self.promo_index = 0;
     }
 
     /// Draws the board and handles input; returns a move the human played.
+    /// `keys_enabled` is false while the typed-move box owns the keyboard.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         board: &Board,
         last_move: Option<Move>,
         interactive: bool,
+        keys_enabled: bool,
     ) -> Option<Move> {
         // Whole pixels per square keep the SVG rasterizer from re-rendering
         // on sub-pixel size wobble.
@@ -58,6 +76,9 @@ impl BoardUi {
             self.clear_interaction();
         }
         let mut played = self.handle_pointer(&response, board, origin, square, interactive);
+        if played.is_none() && interactive && keys_enabled {
+            played = played.or_else(|| self.handle_keys(ui, board));
+        }
 
         // Paint order: squares, tints, hints, pieces; the dragged piece last
         // so it floats above everything.
@@ -92,6 +113,17 @@ impl BoardUi {
         if let Some(selected) = self.selected {
             self.paint_move_hints(&painter, board, selected, origin, square);
         }
+        if let Some(cursor) = self.cursor
+            && interactive
+        {
+            let width = square * 0.055;
+            painter.rect_stroke(
+                self.rect_of(cursor, origin, square).shrink(width / 2.0),
+                0.0,
+                Stroke::new(width, CURSOR_COLOR),
+                egui::StrokeKind::Inside,
+            );
+        }
         if self.dragging
             && let (Some(from), Some(pos)) = (self.selected, response.interact_pointer_pos())
             && let Some(piece) = board.piece_at(from)
@@ -102,9 +134,65 @@ impl BoardUi {
         }
 
         if played.is_none() {
-            played = self.promotion_picker(ui, board);
+            played = self.promotion_picker(ui, board, keys_enabled);
         }
         played
+    }
+
+    /// Arrow keys move a square cursor (screen-relative, so flipping the
+    /// board flips the arrows too); Enter picks up and drops, Esc clears.
+    fn handle_keys(&mut self, ui: &egui::Ui, board: &Board) -> Option<Move> {
+        use egui::{Key, Modifiers};
+        if self.pending_promotion.is_some() {
+            return None; // the picker owns the keyboard for now
+        }
+        let (up, down, left, right, enter, escape) = ui.input_mut(|input| {
+            (
+                input.consume_key(Modifiers::NONE, Key::ArrowUp),
+                input.consume_key(Modifiers::NONE, Key::ArrowDown),
+                input.consume_key(Modifiers::NONE, Key::ArrowLeft),
+                input.consume_key(Modifiers::NONE, Key::ArrowRight),
+                input.consume_key(Modifiers::NONE, Key::Enter),
+                input.consume_key(Modifiers::NONE, Key::Escape),
+            )
+        });
+        if escape {
+            self.selected = None;
+            return None;
+        }
+        let step_file = i32::from(right) - i32::from(left);
+        let step_rank = i32::from(up) - i32::from(down);
+        if step_file != 0 || step_rank != 0 {
+            let from = self
+                .cursor
+                .or_else(|| board.king_square(board.side))
+                .unwrap_or(28);
+            let (df, dr) = if self.flipped {
+                (-step_file, -step_rank)
+            } else {
+                (step_file, step_rank)
+            };
+            let file = (i32::from(from % 8) + df).clamp(0, 7);
+            let rank = (i32::from(from / 8) + dr).clamp(0, 7);
+            // The first arrow press only summons the cursor.
+            self.cursor = Some(if self.cursor.is_some() {
+                (rank * 8 + file) as u8
+            } else {
+                from
+            });
+        }
+        if enter && let Some(sq) = self.cursor {
+            let own = board
+                .piece_at(sq)
+                .is_some_and(|piece| piece.color == board.side);
+            match self.selected {
+                Some(from) if from != sq && !own => return self.resolve_target(board, from, sq),
+                Some(from) if from == sq => self.selected = None,
+                _ if own => self.selected = Some(sq),
+                _ => {}
+            }
+        }
+        None
     }
 
     fn handle_pointer(
@@ -176,10 +264,38 @@ impl BoardUi {
         Some(first)
     }
 
-    fn promotion_picker(&mut self, ui: &mut egui::Ui, board: &Board) -> Option<Move> {
+    fn promotion_picker(
+        &mut self,
+        ui: &mut egui::Ui,
+        board: &Board,
+        keys_enabled: bool,
+    ) -> Option<Move> {
         let (from, to) = self.pending_promotion?;
         let mut played = None;
         let mut cancelled = false;
+        if keys_enabled {
+            use egui::{Key, Modifiers};
+            let (left, right, enter, escape) = ui.input_mut(|input| {
+                (
+                    input.consume_key(Modifiers::NONE, Key::ArrowLeft),
+                    input.consume_key(Modifiers::NONE, Key::ArrowRight),
+                    input.consume_key(Modifiers::NONE, Key::Enter),
+                    input.consume_key(Modifiers::NONE, Key::Escape),
+                )
+            });
+            if left {
+                self.promo_index = self.promo_index.saturating_sub(1);
+            }
+            if right {
+                self.promo_index = (self.promo_index + 1).min(PROMOTION_CHOICES.len() - 1);
+            }
+            if enter {
+                let letter = PROMOTION_CHOICES[self.promo_index].letter();
+                let uci = format!("{}{}{}", square_name(from), square_name(to), letter);
+                played = board.parse_move(&uci);
+            }
+            cancelled = escape;
+        }
         egui::Window::new("promotion_picker")
             .title_bar(false)
             .resizable(false)
@@ -188,19 +304,15 @@ impl BoardUi {
             .show(ui.ctx(), |ui| {
                 ui.label("Promote to");
                 ui.horizontal(|ui| {
-                    for kind in [
-                        PieceKind::Queen,
-                        PieceKind::Rook,
-                        PieceKind::Bishop,
-                        PieceKind::Knight,
-                    ] {
+                    for (index, kind) in PROMOTION_CHOICES.into_iter().enumerate() {
                         let piece = Piece {
                             color: board.side,
                             kind,
                         };
                         let image = egui::Image::new(piece_source(piece))
                             .fit_to_exact_size(Vec2::splat(48.0));
-                        if ui.add(egui::Button::image(image)).clicked() {
+                        let button = egui::Button::image(image).selected(index == self.promo_index);
+                        if ui.add(button).clicked() {
                             let uci = format!(
                                 "{}{}{}",
                                 square_name(from),
@@ -211,11 +323,12 @@ impl BoardUi {
                         }
                     }
                 });
-                cancelled = ui.button("Cancel").clicked();
+                cancelled |= ui.button("Cancel").clicked();
             });
         if played.is_some() || cancelled {
             self.pending_promotion = None;
             self.selected = None;
+            self.promo_index = 0;
         }
         played
     }

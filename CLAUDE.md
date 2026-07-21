@@ -18,26 +18,40 @@ failing tests.
 
 ```sh
 cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets
 ```
+
+The `--workspace` flag matters: the root package is the only default member
+(so `cargo build --release` stays engine-only for the bench scripts), and
+without it the `gui/` crate is silently skipped.
 
 Finish milestones with `cargo build --release` and a UCI smoke test. Keep
 stable checkpoints in separate commits.
 
 ## Layout
 
-The crate is a reusable library (`src/lib.rs`) with a thin UCI binary on top.
+The workspace has two members: the engine at the root (a reusable library,
+`src/lib.rs`, with a thin UCI binary on top) and `gui/`, an egui/eframe
+front-end (crate `chess-gui`, run with `cargo run -p chess-gui`).
 
 | File | Role |
 |---|---|
 | `src/board.rs` | Rules of chess: position, move generation, make/unmake, FEN, attack detection, hashing. |
 | `src/eval.rs` | Static evaluation (material, PST, pawn/king/rook terms, mop-up) and static exchange evaluation (SEE). |
-| `src/engine.rs` | Iterative-deepening alpha-beta search (negamax + PVS) and the transposition table. |
+| `src/engine.rs` | Iterative-deepening alpha-beta search (negamax + PVS), the transposition table, and `time_budget`. |
 | `src/benchmark.rs` | Deterministic `bench` subcommands for reproducible comparison against GoChess. |
 | `src/main.rs` | UCI front-end; runs the search on a worker thread. |
+| `src/clock.rs` | `Instant` alias that swaps in `web-time` on wasm32 (the engine's only conditional dependency). |
 | `src/eval_tables.in` | Piece-square tables `include!`d by `eval.rs` (the active tables). |
 | `src/pst.in` | An earlier PST set; **not referenced by any code**. |
+| `gui/src/app.rs` | GUI state machine: setup screen vs. game, panels, engine-turn scheduling. |
+| `gui/src/engine_driver.rs` | Command/event facade over a worker thread that owns the `Engine`; the wasm seam (a web worker slots in behind the same surface). |
+| `gui/src/board_widget.rs` | Board painting plus mouse (click/drag) and arrow-key-cursor interaction. |
+
+The engine library must keep compiling for wasm32
+(`cargo check --lib --target wasm32-unknown-unknown`); use
+`crate::clock::Instant`, never `std::time::Instant`, inside the library.
 
 ## Conventions worth knowing
 
