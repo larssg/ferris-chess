@@ -1,7 +1,7 @@
 //! Top-level application: the setup screen, the game loop glue between the
 //! UI and the engine worker, and the surrounding panels.
 
-use crate::board_widget::BoardUi;
+use crate::board_widget::{BoardMode, BoardUi};
 use crate::clock::show_clocks;
 use crate::engine_driver::{EngineDriver, EngineEvent};
 use crate::game::GameState;
@@ -88,6 +88,9 @@ impl ChessApp {
                 EngineEvent::BestMove(None) => {}
             }
         }
+        // A staged premove fires the instant the engine's reply lands (the
+        // event drain above), if it is legal in the new position.
+        apply_premove_if_due(game, engine, board_ui);
         if game.check_flag() {
             engine.abort();
         }
@@ -107,6 +110,21 @@ impl ChessApp {
                 if let Some(info) = latest_info.as_ref() {
                     ui.label(egui::RichText::new(&info.summary).monospace().small());
                     ui.add(egui::Label::new(egui::RichText::new(&info.pv).weak().small()).wrap());
+                }
+                if let Some((from, to)) = board_ui.premove() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Premove: {}{}",
+                                chess::board::square_name(from),
+                                chess::board::square_name(to)
+                            ))
+                            .weak(),
+                        );
+                        if ui.small_button("Cancel").clicked() {
+                            board_ui.cancel_premove();
+                        }
+                    });
                 }
                 ui.separator();
                 let human_turn = !game.status.is_over() && game.board.side == game.human;
@@ -135,7 +153,13 @@ impl ChessApp {
 
         let white_share = latest_info.as_ref().map_or(0.5, |info| info.white_share);
         egui::CentralPanel::default().show(ui, |ui| {
-            let interactive = !game.status.is_over() && game.board.side == game.human;
+            let mode = if game.status.is_over() {
+                BoardMode::Inert
+            } else if game.board.side == game.human {
+                BoardMode::MyTurn
+            } else {
+                BoardMode::Premove
+            };
             ui.horizontal_centered(|ui| {
                 let bar_width = 16.0;
                 let bar_height = (ui
@@ -146,9 +170,14 @@ impl ChessApp {
                     .max(24.0)
                     * 8.0;
                 draw_eval_bar(ui, egui::Vec2::new(bar_width, bar_height), white_share);
-                if let Some(chess_move) =
-                    board_ui.show(ui, &game.board, game.last_move, interactive, !input_focused)
-                {
+                if let Some(chess_move) = board_ui.show(
+                    ui,
+                    &game.board,
+                    game.last_move,
+                    mode,
+                    game.human,
+                    !input_focused,
+                ) {
                     game.play_move(chess_move, engine);
                 }
             });
@@ -197,6 +226,27 @@ impl eframe::App for ChessApp {
         } else {
             self.show_setup(ui);
         }
+    }
+}
+
+/// Plays the staged premove if it is the human's turn and the move is legal
+/// in the position the engine left behind; an illegal premove is dropped,
+/// exactly like on the chess servers.
+fn apply_premove_if_due(game: &mut GameState, engine: &mut EngineDriver, board_ui: &mut BoardUi) {
+    if game.status.is_over() || game.board.side != game.human || board_ui.premove().is_none() {
+        return;
+    }
+    let Some((from, to)) = board_ui.take_premove() else {
+        return;
+    };
+    // Bare from-to UCI; promotion premoves auto-queen via parse_move.
+    let uci = format!(
+        "{}{}",
+        chess::board::square_name(from),
+        chess::board::square_name(to)
+    );
+    if let Some(chess_move) = game.board.parse_move(&uci) {
+        game.play_move(chess_move, engine);
     }
 }
 

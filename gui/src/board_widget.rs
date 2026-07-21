@@ -2,10 +2,17 @@
 //! interaction (click-click and drag-and-drop). Moves are never assembled by
 //! hand — the widget builds a UCI string and lets `Board::parse_move` resolve
 //! the castle/en-passant flags, exactly like the UCI front-end does.
+//!
+//! While the engine is thinking the board runs in premove mode: the human
+//! may stage one move ahead of time against geometric "empty-board reach"
+//! (the lichess rule — real legality is only known once the opponent has
+//! moved). The app executes the premove if it is legal when the turn
+//! arrives, and drops it otherwise. Right-click, Esc, or clicking an empty
+//! square cancels it.
 
 use crate::pieces::piece_source;
 use chess::board::square_name;
-use chess::{Board, Move, Piece, PieceKind};
+use chess::{Board, Color, Move, Piece, PieceKind};
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 const LIGHT_SQUARE: Color32 = Color32::from_rgb(240, 217, 181);
@@ -13,6 +20,7 @@ const DARK_SQUARE: Color32 = Color32::from_rgb(181, 136, 99);
 const LAST_MOVE_TINT: Color32 = Color32::from_rgba_premultiplied(120, 150, 15, 90);
 const SELECTED_TINT: Color32 = Color32::from_rgba_premultiplied(20, 100, 40, 90);
 const CHECK_TINT: Color32 = Color32::from_rgba_premultiplied(150, 20, 20, 90);
+const PREMOVE_TINT: Color32 = Color32::from_rgba_premultiplied(40, 70, 150, 100);
 const HINT_COLOR: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 45);
 const CURSOR_COLOR: Color32 = Color32::from_rgb(70, 130, 200);
 
@@ -23,12 +31,25 @@ const PROMOTION_CHOICES: [PieceKind; 4] = [
     PieceKind::Knight,
 ];
 
+/// What the human is allowed to do with the board this frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BoardMode {
+    /// Game over or no game: display only.
+    Inert,
+    /// Human to move: normal legal-move interaction.
+    MyTurn,
+    /// Engine to move: interaction stages a premove instead.
+    Premove,
+}
+
 pub struct BoardUi {
     pub flipped: bool,
     selected: Option<u8>,
     dragging: bool,
     /// A from/to pair waiting on the promotion picker.
     pending_promotion: Option<(u8, u8)>,
+    /// A staged move to try the moment it becomes the human's turn.
+    premove: Option<(u8, u8)>,
     /// The arrow-key square cursor; appears on first arrow press.
     cursor: Option<u8>,
     /// Which of [`PROMOTION_CHOICES`] the keyboard has highlighted.
@@ -42,6 +63,7 @@ impl BoardUi {
             selected: None,
             dragging: false,
             pending_promotion: None,
+            premove: None,
             cursor: None,
             promo_index: 0,
         }
@@ -51,8 +73,22 @@ impl BoardUi {
         self.selected = None;
         self.dragging = false;
         self.pending_promotion = None;
+        self.premove = None;
         self.cursor = None;
         self.promo_index = 0;
+    }
+
+    pub fn premove(&self) -> Option<(u8, u8)> {
+        self.premove
+    }
+
+    /// Hands the staged premove to the caller (who decides its legality).
+    pub fn take_premove(&mut self) -> Option<(u8, u8)> {
+        self.premove.take()
+    }
+
+    pub fn cancel_premove(&mut self) {
+        self.premove = None;
     }
 
     /// Draws the board and handles input; returns a move the human played.
@@ -62,7 +98,8 @@ impl BoardUi {
         ui: &mut egui::Ui,
         board: &Board,
         last_move: Option<Move>,
-        interactive: bool,
+        mode: BoardMode,
+        human: Color,
         keys_enabled: bool,
     ) -> Option<Move> {
         // Whole pixels per square keep the SVG rasterizer from re-rendering
@@ -72,12 +109,12 @@ impl BoardUi {
             ui.allocate_painter(Vec2::splat(square * 8.0), Sense::click_and_drag());
         let origin = response.rect;
 
-        if !interactive {
+        if mode == BoardMode::Inert {
             self.clear_interaction();
         }
-        let mut played = self.handle_pointer(&response, board, origin, square, interactive);
-        if played.is_none() && interactive && keys_enabled {
-            played = played.or_else(|| self.handle_keys(ui, board));
+        let mut played = self.handle_pointer(&response, board, origin, square, mode, human);
+        if played.is_none() && mode != BoardMode::Inert && keys_enabled {
+            played = played.or_else(|| self.handle_keys(ui, board, mode, human));
         }
 
         // Paint order: squares, tints, hints, pieces; the dragged piece last
@@ -90,6 +127,11 @@ impl BoardUi {
         if let Some(m) = last_move {
             for sq in [m.from, m.to] {
                 painter.rect_filled(self.rect_of(sq, origin, square), 0.0, LAST_MOVE_TINT);
+            }
+        }
+        if let Some((from, to)) = self.premove {
+            for sq in [from, to] {
+                painter.rect_filled(self.rect_of(sq, origin, square), 0.0, PREMOVE_TINT);
             }
         }
         if board.in_check(board.side)
@@ -111,10 +153,16 @@ impl BoardUi {
             }
         }
         if let Some(selected) = self.selected {
-            self.paint_move_hints(&painter, board, selected, origin, square);
+            self.paint_hints(
+                &painter,
+                board,
+                &self.hint_targets(board, selected, mode, human),
+                origin,
+                square,
+            );
         }
         if let Some(cursor) = self.cursor
-            && interactive
+            && mode != BoardMode::Inert
         {
             let width = square * 0.055;
             painter.rect_stroke(
@@ -140,8 +188,15 @@ impl BoardUi {
     }
 
     /// Arrow keys move a square cursor (screen-relative, so flipping the
-    /// board flips the arrows too); Enter picks up and drops, Esc clears.
-    fn handle_keys(&mut self, ui: &egui::Ui, board: &Board) -> Option<Move> {
+    /// board flips the arrows too); Enter picks up and drops, Esc clears
+    /// the selection and any staged premove.
+    fn handle_keys(
+        &mut self,
+        ui: &egui::Ui,
+        board: &Board,
+        mode: BoardMode,
+        human: Color,
+    ) -> Option<Move> {
         use egui::{Key, Modifiers};
         if self.pending_promotion.is_some() {
             return None; // the picker owns the keyboard for now
@@ -158,6 +213,7 @@ impl BoardUi {
         });
         if escape {
             self.selected = None;
+            self.premove = None;
             return None;
         }
         let step_file = i32::from(right) - i32::from(left);
@@ -165,7 +221,7 @@ impl BoardUi {
         if step_file != 0 || step_rank != 0 {
             let from = self
                 .cursor
-                .or_else(|| board.king_square(board.side))
+                .or_else(|| board.king_square(human))
                 .unwrap_or(28);
             let (df, dr) = if self.flipped {
                 (-step_file, -step_rank)
@@ -182,15 +238,7 @@ impl BoardUi {
             });
         }
         if enter && let Some(sq) = self.cursor {
-            let own = board
-                .piece_at(sq)
-                .is_some_and(|piece| piece.color == board.side);
-            match self.selected {
-                Some(from) if from != sq && !own => return self.resolve_target(board, from, sq),
-                Some(from) if from == sq => self.selected = None,
-                _ if own => self.selected = Some(sq),
-                _ => {}
-            }
+            return self.act_on_square(board, sq, mode, human);
         }
         None
     }
@@ -201,16 +249,22 @@ impl BoardUi {
         board: &Board,
         origin: Rect,
         square: f32,
-        interactive: bool,
+        mode: BoardMode,
+        human: Color,
     ) -> Option<Move> {
-        if !interactive || self.pending_promotion.is_some() {
+        if mode == BoardMode::Inert || self.pending_promotion.is_some() {
             self.dragging = false;
+            return None;
+        }
+        if response.secondary_clicked() {
+            self.selected = None;
+            self.premove = None;
             return None;
         }
         let pointer_square = response
             .interact_pointer_pos()
             .and_then(|pos| self.square_at(pos, origin, square));
-        let own_piece = |sq: u8| board.piece_at(sq).is_some_and(|p| p.color == board.side);
+        let own_piece = |sq: u8| board.piece_at(sq).is_some_and(|p| p.color == human);
 
         if response.drag_started()
             && let Some(sq) = pointer_square
@@ -225,24 +279,53 @@ impl BoardUi {
             if let (Some(from), Some(to)) = (self.selected, pointer_square)
                 && from != to
             {
-                return self.resolve_target(board, from, to);
+                return self.act_on_square(board, to, mode, human);
             }
             return None;
         }
         if response.clicked()
             && let Some(sq) = pointer_square
         {
-            match self.selected {
-                Some(from) if from != sq && !own_piece(sq) => {
+            return self.act_on_square(board, sq, mode, human);
+        }
+        None
+    }
+
+    /// The shared select/target state machine behind clicks, drops, and the
+    /// keyboard cursor. In premove mode a resolved target stages a premove
+    /// instead of returning a move, and a dead click cancels the premove.
+    fn act_on_square(
+        &mut self,
+        board: &Board,
+        sq: u8,
+        mode: BoardMode,
+        human: Color,
+    ) -> Option<Move> {
+        let own = board.piece_at(sq).is_some_and(|piece| piece.color == human);
+        match self.selected {
+            Some(from) if from == sq => self.selected = None,
+            Some(from) if !own => match mode {
+                BoardMode::MyTurn => {
                     let played = self.resolve_target(board, from, sq);
                     if played.is_none() && self.pending_promotion.is_none() {
                         self.selected = None;
                     }
                     return played;
                 }
-                Some(from) if from == sq => self.selected = None,
-                _ if own_piece(sq) => self.selected = Some(sq),
-                _ => self.selected = None,
+                BoardMode::Premove => {
+                    if premove_reach(board, human, from).contains(&sq) {
+                        self.premove = Some((from, sq));
+                    } else {
+                        self.premove = None;
+                    }
+                    self.selected = None;
+                }
+                BoardMode::Inert => {}
+            },
+            _ if own => self.selected = Some(sq),
+            _ => {
+                self.selected = None;
+                self.premove = None;
             }
         }
         None
@@ -333,20 +416,41 @@ impl BoardUi {
         played
     }
 
-    fn paint_move_hints(
+    /// Where the selected piece may go, as (target, looks-like-a-capture)
+    /// pairs: real legal destinations on the human's turn, geometric reach
+    /// while staging a premove.
+    fn hint_targets(
         &self,
-        painter: &egui::Painter,
         board: &Board,
         from: u8,
+        mode: BoardMode,
+        human: Color,
+    ) -> Vec<(u8, bool)> {
+        match mode {
+            BoardMode::MyTurn => board
+                .legal_moves()
+                .into_iter()
+                .filter(|m| m.from == from)
+                .map(|m| (m.to, m.en_passant || board.piece_at(m.to).is_some()))
+                .collect(),
+            BoardMode::Premove => premove_reach(board, human, from)
+                .into_iter()
+                .map(|to| (to, board.piece_at(to).is_some()))
+                .collect(),
+            BoardMode::Inert => Vec::new(),
+        }
+    }
+
+    fn paint_hints(
+        &self,
+        painter: &egui::Painter,
+        _board: &Board,
+        targets: &[(u8, bool)],
         origin: Rect,
         square: f32,
     ) {
-        for m in board.legal_moves() {
-            if m.from != from {
-                continue;
-            }
-            let center = self.rect_of(m.to, origin, square).center();
-            let capture = m.en_passant || board.piece_at(m.to).is_some();
+        for &(to, capture) in targets {
+            let center = self.rect_of(to, origin, square).center();
             if capture {
                 painter.circle_stroke(
                     center,
@@ -420,6 +524,118 @@ impl BoardUi {
     }
 }
 
+/// Squares a piece of the human's that could ever be reached from `from` on
+/// an otherwise empty board — the premove targeting rule. Squares holding
+/// the human's own pieces are excluded: they cannot vacate during the
+/// opponent's move, so such a premove could never become legal.
+fn premove_reach(board: &Board, human: Color, from: u8) -> Vec<u8> {
+    let Some(piece) = board.piece_at(from) else {
+        return Vec::new();
+    };
+    premove_targets(piece, from)
+        .into_iter()
+        .filter(|&sq| !board.piece_at(sq).is_some_and(|p| p.color == human))
+        .collect()
+}
+
+/// Pure geometry: every square this piece could reach on an empty board,
+/// including pawn double pushes and captures, and castling king hops.
+fn premove_targets(piece: Piece, from: u8) -> Vec<u8> {
+    let file = i32::from(from % 8);
+    let rank = i32::from(from / 8);
+    let mut targets = Vec::new();
+    let push = |f: i32, r: i32, targets: &mut Vec<u8>| {
+        if let Some(sq) = square_if_on_board(f, r) {
+            targets.push(sq);
+        }
+    };
+    match piece.kind {
+        PieceKind::Pawn => {
+            let dir = if piece.color == Color::White { 1 } else { -1 };
+            let home = if piece.color == Color::White { 1 } else { 6 };
+            push(file, rank + dir, &mut targets);
+            if rank == home {
+                push(file, rank + 2 * dir, &mut targets);
+            }
+            push(file - 1, rank + dir, &mut targets);
+            push(file + 1, rank + dir, &mut targets);
+        }
+        PieceKind::Knight => {
+            for (df, dr) in [
+                (1, 2),
+                (2, 1),
+                (2, -1),
+                (1, -2),
+                (-1, -2),
+                (-2, -1),
+                (-2, 1),
+                (-1, 2),
+            ] {
+                push(file + df, rank + dr, &mut targets);
+            }
+        }
+        PieceKind::Bishop => rays(
+            file,
+            rank,
+            &[(1, 1), (1, -1), (-1, 1), (-1, -1)],
+            &mut targets,
+        ),
+        PieceKind::Rook => rays(
+            file,
+            rank,
+            &[(1, 0), (-1, 0), (0, 1), (0, -1)],
+            &mut targets,
+        ),
+        PieceKind::Queen => rays(
+            file,
+            rank,
+            &[
+                (1, 0),
+                (-1, 0),
+                (0, 1),
+                (0, -1),
+                (1, 1),
+                (1, -1),
+                (-1, 1),
+                (-1, -1),
+            ],
+            &mut targets,
+        ),
+        PieceKind::King => {
+            for df in -1..=1 {
+                for dr in -1..=1 {
+                    if df != 0 || dr != 0 {
+                        push(file + df, rank + dr, &mut targets);
+                    }
+                }
+            }
+            // Castling premoves: king home square hops two files.
+            if piece.color == Color::White && from == 4 {
+                targets.extend([6, 2]);
+            }
+            if piece.color == Color::Black && from == 60 {
+                targets.extend([62, 58]);
+            }
+        }
+    }
+    targets
+}
+
+fn rays(file: i32, rank: i32, directions: &[(i32, i32)], targets: &mut Vec<u8>) {
+    for &(df, dr) in directions {
+        let (mut f, mut r) = (file + df, rank + dr);
+        while let Some(sq) = square_if_on_board(f, r) {
+            targets.push(sq);
+            f += df;
+            r += dr;
+        }
+    }
+}
+
+fn square_if_on_board(file: i32, rank: i32) -> Option<u8> {
+    ((0..8).contains(&file) && (0..8).contains(&rank)).then(|| (rank * 8 + file) as u8)
+}
+
 /// Coordinate labels sit on the square itself, so use the opposite square
 /// color for contrast.
 fn square_label_color(sq: u8) -> Color32 {
@@ -427,5 +643,55 @@ fn square_label_color(sq: u8) -> Color32 {
         DARK_SQUARE
     } else {
         LIGHT_SQUARE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chess::board::parse_square;
+
+    fn targets_of(piece: Piece, from: &str) -> Vec<String> {
+        let mut names: Vec<String> = premove_targets(piece, parse_square(from).unwrap())
+            .into_iter()
+            .map(square_name)
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn pawn_premove_reach_includes_pushes_and_both_captures() {
+        let pawn = Piece {
+            color: Color::White,
+            kind: PieceKind::Pawn,
+        };
+        assert_eq!(targets_of(pawn, "e2"), ["d3", "e3", "e4", "f3"]);
+        // Not on the home rank: no double push.
+        assert_eq!(targets_of(pawn, "a3"), ["a4", "b4"]);
+    }
+
+    #[test]
+    fn king_premove_reach_includes_castling_hops_from_home() {
+        let king = Piece {
+            color: Color::White,
+            kind: PieceKind::King,
+        };
+        let from_home = targets_of(king, "e1");
+        assert!(from_home.contains(&"g1".to_string()));
+        assert!(from_home.contains(&"c1".to_string()));
+        let elsewhere = targets_of(king, "e4");
+        assert_eq!(elsewhere.len(), 8);
+    }
+
+    #[test]
+    fn premove_reach_excludes_own_pieces_and_ignores_blockers() {
+        let board = Board::startpos();
+        // The a1 rook's geometric reach runs the whole file and rank, but
+        // squares holding White's own pieces are filtered out.
+        let reach = premove_reach(&board, Color::White, parse_square("a1").unwrap());
+        assert!(!reach.contains(&parse_square("a2").unwrap()));
+        assert!(reach.contains(&parse_square("a5").unwrap()));
+        assert!(reach.contains(&parse_square("a7").unwrap()));
     }
 }
