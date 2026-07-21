@@ -4,6 +4,14 @@ name: Deploy web GUI to GitHub Pages
 on:
   push:
     branches: [main]
+    # Only rebuild when the GUI, the engine it embeds, the lockfile, or this
+    # workflow change — not for docs or unrelated tweaks.
+    paths:
+      - gui/**
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/deploy-gui.yml
   workflow_dispatch:
 
 # Allow the deploy job to publish to Pages, and let it read the repo.
