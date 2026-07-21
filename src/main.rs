@@ -1,3 +1,7 @@
+//! UCI front-end: translates the text protocol on stdin/stdout into calls on the
+//! `chess` library. The engine runs on a worker thread so the main loop can keep
+//! reading commands (notably `stop` and `ponderhit`) while a search is running.
+
 use chess::{Board, Color, Engine, SearchHandle, SearchLimits};
 use std::{
     io::{self, BufRead},
@@ -5,11 +9,16 @@ use std::{
     time::Duration,
 };
 
+/// A search in flight on a worker thread. The thread owns the [`Engine`] and
+/// hands it back when it finishes; `control` is our clone of its stop/ponder handle.
 struct RunningSearch {
     control: SearchHandle,
     worker: JoinHandle<Engine>,
 }
 
+/// Stops any running search and reclaims the engine the worker was holding. The
+/// engine is threaded in and out this way (rather than shared) so it stays
+/// single-owner and its TT/history persist across searches.
 fn stop_search(running: &mut Option<RunningSearch>, engine: &mut Option<Engine>) {
     if let Some(search) = running.take() {
         search.control.stop();
@@ -20,6 +29,7 @@ fn stop_search(running: &mut Option<RunningSearch>, engine: &mut Option<Engine>)
 }
 
 fn main() {
+    // First, give the benchmark harness a chance to handle `bench ...` args.
     let args: Vec<_> = std::env::args().skip(1).collect();
     match chess::benchmark::run(&args) {
         Ok(true) => return,
@@ -29,6 +39,7 @@ fn main() {
             std::process::exit(2);
         }
     }
+    // `engine` is `Some` when idle and `None` while the worker holds it.
     let mut board = Board::startpos();
     let mut engine = Some(Engine::new());
     let mut running: Option<RunningSearch> = None;
@@ -38,6 +49,8 @@ fn main() {
         if parts.is_empty() {
             continue;
         }
+        // `stop` and `ponderhit` are handled up front because they must reach a
+        // search that is currently running, not wait for the engine to be idle.
         if parts[0] == "stop" {
             stop_search(&mut running, &mut engine);
             continue;
@@ -58,6 +71,8 @@ fn main() {
                 board = Board::startpos();
                 engine.as_mut().unwrap().clear()
             }
+            // The only supported option is `Hash`; parse its megabyte value and
+            // clamp it to the advertised range.
             "setoption" => {
                 stop_search(&mut running, &mut engine);
                 if let (Some(name), Some(value)) = (
@@ -71,6 +86,8 @@ fn main() {
                     engine.as_mut().unwrap().set_hash_mb(mb.clamp(1, 4096));
                 }
             }
+            // `position [startpos | fen <FEN>] [moves <m>...]`: set the board,
+            // then replay any listed moves from it.
             "position" => {
                 stop_search(&mut running, &mut engine);
                 let mut i = 1;
@@ -96,6 +113,8 @@ fn main() {
                     }
                 }
             }
+            // `go ...`: parse the search limits, derive a time budget from the
+            // clock if no explicit `movetime` was given, then launch the worker.
             "go" => {
                 stop_search(&mut running, &mut engine);
                 let mut limits = SearchLimits::default();
@@ -180,6 +199,10 @@ fn main() {
                     }
                     i += 1
                 }
+                // Budget the move from the side-to-move's remaining clock: a
+                // share of the time (split over the expected moves-to-go) plus
+                // most of the increment, kept below half the clock and above a
+                // small floor, with a 30 ms safety margin against flagging.
                 if !parts.contains(&"movetime")
                     && let Some(left) = if board.side == Color::White {
                         wtime
@@ -201,6 +224,8 @@ fn main() {
                 limits.white_increment = Duration::from_millis(winc);
                 limits.black_increment = Duration::from_millis(binc);
                 limits.moves_to_go = Some(moves_to_go as u32);
+                // Move the engine onto a worker thread; it prints `info` lines as
+                // it searches and a final `bestmove`, then returns the engine.
                 let control = SearchHandle::new(limits.ponder);
                 let worker_control = control.clone();
                 let search_board = board.clone();
@@ -237,6 +262,7 @@ fn main() {
                 });
                 running = Some(RunningSearch { control, worker });
             }
+            // `d`: a debug aid that dumps the current position as FEN.
             "d" => println!("{}", board.to_fen()),
             "quit" => {
                 stop_search(&mut running, &mut engine);
@@ -245,5 +271,6 @@ fn main() {
             _ => {}
         }
     }
+    // Stdin closed: make sure no worker is left running.
     stop_search(&mut running, &mut engine);
 }

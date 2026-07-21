@@ -1,3 +1,12 @@
+//! The search: iterative-deepening alpha-beta (negamax with principal-variation
+//! search) plus the transposition table backing it.
+//!
+//! Scores are in centipawns from the side-to-move's point of view (negamax
+//! convention: a node negates its child's score). A checkmate is scored near
+//! `MATE`, offset by the ply at which it is delivered so that shorter mates
+//! score higher. `INF` sits above every real score and is used as the initial
+//! alpha/beta bound.
+
 use crate::eval::piece_value;
 use crate::{Board, Move, PieceKind, evaluate, static_exchange_eval};
 use std::{
@@ -8,9 +17,17 @@ use std::{
     time::{Duration, Instant},
 };
 const INF: i32 = 100_000;
+/// Scores at or above `MATE - 64` denote a forced mate; the 64-ply band leaves
+/// room to encode "mate in N" without colliding with ordinary evaluations.
 const MATE: i32 = 90_000;
+/// Reverse futility pruning applies only in shallow nodes...
 const RFP_MAX_DEPTH: u8 = 6;
+/// ...and requires the static eval to clear beta by this much per remaining ply.
 const RFP_MARGIN: i32 = 80;
+/// The stopping conditions for a search, mirroring the UCI `go` parameters. A
+/// search ends when any active limit is reached; the clock fields feed the time
+/// budget computed by the UCI adapter, and `root_moves` restricts the search to
+/// a `searchmoves` subset.
 #[derive(Clone, Debug)]
 pub struct SearchLimits {
     pub depth: u8,
@@ -44,12 +61,15 @@ impl Default for SearchLimits {
         }
     }
 }
+/// Whether a reported score is an ordinary centipawn value or a distance to
+/// mate, which the UCI layer prints differently (`score cp` vs `score mate`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScoreType {
     Centipawn,
     Mate,
 }
 
+/// Why a search stopped — surfaced for diagnostics and UCI reporting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminationReason {
     Depth,
@@ -60,6 +80,10 @@ pub enum TerminationReason {
     Cancelled,
 }
 
+/// A cloneable, thread-safe handle for controlling a running search from
+/// another thread. The UCI worker thread owns the search; the main thread holds
+/// a clone to deliver `stop` and `ponderhit`. Both flags are shared via `Arc`
+/// so either side sees the other's writes.
 #[derive(Clone, Debug)]
 pub struct SearchHandle {
     stop: Arc<AtomicBool>,
@@ -67,6 +91,8 @@ pub struct SearchHandle {
 }
 
 impl SearchHandle {
+    /// Creates a handle. `pondering` starts true for a `go ponder` search, which
+    /// then searches without spending its clock until a `ponderhit` arrives.
     pub fn new(pondering: bool) -> Self {
         Self {
             stop: Arc::new(AtomicBool::new(false)),
@@ -74,10 +100,13 @@ impl SearchHandle {
         }
     }
 
+    /// Requests that the search abort as soon as it next checks in.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
 
+    /// Signals that the pondered move was played: the search converts to a
+    /// normal timed search from this moment.
     pub fn ponderhit(&self) {
         self.pondering.store(false, Ordering::Relaxed);
     }
@@ -87,6 +116,8 @@ impl SearchHandle {
     }
 }
 
+/// The outcome of a search, carrying both the chosen move and the statistics
+/// UCI reports in `info` lines (depth, node counts, PV, and so on).
 #[derive(Clone, Debug)]
 pub struct SearchResult {
     pub best_move: Option<Move>,
@@ -101,10 +132,17 @@ pub struct SearchResult {
     pub score_type: ScoreType,
     pub termination: TerminationReason,
 }
+// What a stored score represents relative to the window it was searched in.
+// EXACT is a true value; LOWER/UPPER are beta/alpha cutoffs, usable only when
+// the current window makes the bound conclusive.
 const BOUND_EXACT: u8 = 0;
 const BOUND_LOWER: u8 = 1;
 const BOUND_UPPER: u8 = 2;
 
+/// One packed transposition-table record. Kept to 16 bytes so a four-slot
+/// cluster is exactly one 64-byte cache line. `depth` doubles as an occupancy
+/// flag: a stored entry always has `depth >= 1`, so `depth == 0` means empty.
+/// `flags` packs the generation (high 6 bits) and the bound (low 2 bits).
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 struct Slot {
@@ -116,12 +154,17 @@ struct Slot {
     flags: u8,
 }
 
+/// A cache-line-aligned bucket of four slots that share a table index; probing
+/// and replacement operate within the cluster. See the `tt_cluster_is_one_cache_line`
+/// test for the size/alignment guarantees this relies on.
 #[derive(Clone, Copy, Default)]
 #[repr(C, align(64))]
 struct Cluster {
     slots: [Slot; 4],
 }
 
+/// A decoded transposition-table hit, with mate scores already adjusted back to
+/// the current ply and depth restored to its true value.
 #[derive(Clone, Copy, Debug)]
 struct Entry {
     depth: u8,
@@ -131,18 +174,25 @@ struct Entry {
     static_eval: Option<i16>,
 }
 
+/// Per-node context threaded through the recursion: whether this is a
+/// principal-variation node (searched with a full window) and whether a null
+/// move is still permitted here (it is disabled right after playing one).
 #[derive(Clone, Copy)]
 struct NodeState {
     pv: bool,
     allow_null: bool,
 }
 
+/// A fixed-size, cluster-bucketed transposition table. `generation` is bumped
+/// each search so that stale entries can be preferred for replacement.
 struct TranspositionTable {
     clusters: Vec<Cluster>,
     generation: u8,
 }
 
 impl TranspositionTable {
+    /// Allocates a table sized to roughly `mb` megabytes, rounded down to a
+    /// whole number of clusters (at least one).
     fn with_mb(mb: usize) -> Self {
         let bytes = mb.max(1).saturating_mul(1024 * 1024);
         let count = (bytes / size_of::<Cluster>()).max(1);
@@ -152,15 +202,24 @@ impl TranspositionTable {
         }
     }
 
+    /// Wipes the table (used by `ucinewgame`).
     fn clear(&mut self) {
         self.clusters.fill(Cluster::default());
         self.generation = 0;
     }
 
+    /// Advances the generation counter at the start of each search, wrapping
+    /// within the 6 bits it shares with the bound in `flags`. Entries from older
+    /// generations become cheaper to evict.
     fn new_search(&mut self) {
         self.generation = self.generation.wrapping_add(1) & 0x3f;
     }
 
+    /// Probes the cluster for `key`. The stored score is un-normalized from its
+    /// ply-independent form back to the caller's `ply`, and `static_eval`'s
+    /// `i16::MIN` sentinel is decoded to `None` (meaning "not cached").
+    ///
+    /// `depth` is stored biased by one (so 0 can mean empty) and decoded here.
     fn get(&self, key: u64, ply: u8) -> Option<Entry> {
         self.clusters[key as usize % self.clusters.len()]
             .slots
@@ -175,6 +234,13 @@ impl TranspositionTable {
             })
     }
 
+    /// Inserts or updates the record for `key`.
+    ///
+    /// Replacement first reuses a matching or empty slot; otherwise it evicts
+    /// the slot with the lowest "worth", scoring depth minus an age penalty so
+    /// that shallow and stale entries go first. A deep existing entry is kept
+    /// over a much shallower non-exact one, but its missing static eval is still
+    /// backfilled. Mate scores are normalized to be ply-independent on the way in.
     fn store(&mut self, key: u64, entry: Entry, ply: u8) {
         let index = key as usize % self.clusters.len();
         let generation = self.generation;
@@ -193,6 +259,7 @@ impl TranspositionTable {
                     .map_or(0, |(index, _)| index)
             });
         let old = slots[replace];
+        // Keep a substantially deeper existing entry; only salvage its static eval.
         if old.key == key && old.depth > entry.depth.saturating_add(4) && entry.bound != BOUND_EXACT
         {
             if old.static_eval == i16::MIN
@@ -202,6 +269,7 @@ impl TranspositionTable {
             }
             return;
         }
+        // Preserve a previously cached static eval when this store lacks one.
         let static_eval = entry
             .static_eval
             .or_else(|| (old.key == key && old.static_eval != i16::MIN).then_some(old.static_eval));
@@ -215,6 +283,9 @@ impl TranspositionTable {
         };
     }
 
+    /// Estimates table fullness in permille (0..1000) for the UCI `hashfull`
+    /// field, sampling the first 250 clusters and counting current-generation
+    /// entries.
     fn hashfull(&self) -> u16 {
         let mut total = 0usize;
         let mut used = 0usize;
@@ -227,10 +298,19 @@ impl TranspositionTable {
         (used * 1000).checked_div(total).unwrap_or(0) as u16
     }
 }
+/// A reusable search engine. It owns the transposition table and the move-
+/// ordering heuristics (history and killer tables) so they persist across the
+/// `go` commands of a game; per-search bookkeeping (node count, clocks, stop
+/// state) is reset at the start of every search.
 pub struct Engine {
     tt: TranspositionTable,
+    /// `history[from][to]`: a running bonus for quiet moves that caused cutoffs,
+    /// used as a move-ordering tiebreak.
     history: [[i32; 64]; 64],
+    /// Two killer moves per ply: quiet moves that recently produced a cutoff at
+    /// the same depth and are tried early elsewhere.
     killers: [[Move; 2]; 64],
+    /// Stack of position hashes along the current line, for repetition detection.
     hashes: Vec<u64>,
     nodes: u64,
     start: Instant,
@@ -241,6 +321,7 @@ pub struct Engine {
     termination: TerminationReason,
     control: SearchHandle,
     pondering: bool,
+    /// False during `infinite`/ponder searches, which ignore the clock.
     time_enabled: bool,
 }
 impl Default for Engine {
@@ -267,13 +348,17 @@ impl Engine {
             time_enabled: true,
         }
     }
+    /// Resets game-spanning state for a fresh game (`ucinewgame`).
     pub fn clear(&mut self) {
         self.tt.clear();
         self.hashes.clear()
     }
+    /// Reallocates the transposition table to the given size (`setoption Hash`).
     pub fn set_hash_mb(&mut self, mb: usize) {
         self.tt = TranspositionTable::with_mb(mb);
     }
+    /// Searches with a freshly created control handle. Convenient for callers
+    /// (tests, benchmarks) that do not need external cancellation.
     pub fn search(
         &mut self,
         b: &Board,
@@ -284,6 +369,12 @@ impl Engine {
         self.search_with_handle(b, limits, control, info)
     }
 
+    /// The main entry point: iterative deepening from depth 1 up to the limit,
+    /// invoking `info` after each completed depth. `control` allows another
+    /// thread to `stop` the search or convert a ponder into a real search.
+    ///
+    /// Returns the best move found so far even when interrupted, so a `stop`
+    /// always yields a legal reply.
     pub fn search_with_handle(
         &mut self,
         b: &Board,
@@ -315,6 +406,7 @@ impl Engine {
             score_type: ScoreType::Centipawn,
             termination: TerminationReason::Depth,
         };
+        // Compute the legal root moves once, honoring any `searchmoves` filter.
         let mut legal = b.legal_moves();
         if !limits.root_moves.is_empty() {
             legal.retain(|chess_move| limits.root_moves.contains(chess_move));
@@ -323,9 +415,13 @@ impl Engine {
             result.termination = TerminationReason::NoLegalMoves;
             return result;
         }
+        // Seed a fallback so an immediate stop still returns a legal move.
         result.best_move = Some(legal[0]);
         let mut board = b.clone();
         for depth in 1..=limits.depth {
+            // Aspiration windows: after the first depth, search a narrow window
+            // centered on the previous score, widening on a fail high/low. A
+            // correct guess makes the search much cheaper than a full window.
             let (mut alpha, mut beta) = if depth == 1 {
                 (-INF, INF)
             } else {
@@ -338,6 +434,7 @@ impl Engine {
                     result.termination = self.termination;
                     return result;
                 }
+                // Fail low: widen alpha once to ±200, then open it fully.
                 if score <= alpha {
                     if delta >= 200 {
                         alpha = -INF;
@@ -348,6 +445,7 @@ impl Engine {
                     }
                     continue;
                 }
+                // Fail high: symmetric widening of beta.
                 if score >= beta {
                     if delta >= 200 {
                         alpha = -INF;
@@ -358,6 +456,7 @@ impl Engine {
                     }
                     continue;
                 }
+                // Score landed inside the window: accept this depth's result.
                 result.score = score;
                 result.best_move = best;
                 break;
@@ -375,6 +474,8 @@ impl Engine {
                 ScoreType::Centipawn
             };
             info(&result);
+            // Stop early once a mate is proven, or once we have used half the
+            // time budget — starting another full depth would likely overrun it.
             if result.score.abs() > MATE - 64
                 || (self.time_enabled && !self.pondering && self.start.elapsed() >= self.limit / 2)
             {
@@ -388,6 +489,10 @@ impl Engine {
         }
         result
     }
+    /// Searches the root move list at one depth using principal-variation
+    /// search: the first (best-ordered) move gets a full window, and the rest a
+    /// null-window scout that is re-searched fully only if it unexpectedly
+    /// raises alpha. Returns the best score and move.
     fn root(
         &mut self,
         b: &mut Board,
@@ -404,6 +509,7 @@ impl Engine {
             self.hashes.push(b.hash);
             let undo = b.make_move(m);
             let mut score = if index == 0 {
+                // Full-window search of the presumed best move.
                 -self.negamax(
                     b,
                     depth - 1,
@@ -416,6 +522,7 @@ impl Engine {
                     },
                 )
             } else {
+                // Scout the remaining moves with a null window around alpha.
                 -self.negamax(
                     b,
                     depth - 1,
@@ -428,6 +535,8 @@ impl Engine {
                     },
                 )
             };
+            // A scout that beat alpha (but not beta) needs a full re-search to
+            // get its true score.
             if index > 0 && score > alpha && score < beta {
                 score = -self.negamax(
                     b,
@@ -451,6 +560,8 @@ impl Engine {
                 best = Some(m)
             }
         }
+        // Record the root result so the next iteration and the PV extraction can
+        // find the best move immediately.
         if let Some(best_move) = best {
             self.tt.store(
                 b.hash,
@@ -466,6 +577,15 @@ impl Engine {
         }
         (alpha, best)
     }
+    /// The recursive negamax search with alpha-beta pruning. Returns the score
+    /// of the position from the side-to-move's perspective. `ply` is the
+    /// distance from the root (used for mate scoring and killer/repetition
+    /// indexing); `depth` is the remaining search depth.
+    ///
+    /// The body is a sequence of gates applied before the move loop — stop
+    /// checks, draw detection, transposition-table cutoff, reverse futility
+    /// pruning, null-move pruning — followed by the move loop itself with
+    /// late-move reductions and PVS re-searches.
     fn negamax(
         &mut self,
         b: &mut Board,
@@ -477,18 +597,22 @@ impl Engine {
     ) -> i32 {
         self.nodes += 1;
         self.seldepth = self.seldepth.max(ply);
+        // Honor an external stop request as soon as it is seen.
         if self.control.is_stopped() {
             self.stopped = true;
             self.termination = TerminationReason::Cancelled;
             return 0;
         }
+        // A ponderhit converts this into a timed search; restart the clock now.
         if self.pondering && !self.control.pondering.load(Ordering::Relaxed) {
             self.pondering = false;
             self.start = Instant::now();
         }
+        // Hard ceiling on recursion depth; just evaluate statically.
         if ply >= 63 {
             return evaluate(b);
         }
+        // Check the clock and node budget periodically rather than every node.
         if self.nodes & 2047 == 0
             && ((self.time_enabled && !self.pondering && self.start.elapsed() >= self.limit)
                 || self.node_limit.is_some_and(|n| self.nodes >= n))
@@ -501,6 +625,9 @@ impl Engine {
             };
             return 0;
         }
+        // Draw by rule or by repetition. Only positions since the last
+        // irreversible move (bounded by the halfmove clock) can repeat, and only
+        // same-side-to-move positions (every second entry) are candidates.
         if b.is_draw()
             || self
                 .hashes
@@ -512,12 +639,17 @@ impl Engine {
         {
             return 0;
         }
+        // At the horizon, resolve captures via quiescence search.
         if depth == 0 {
             return self.qsearch(b, alpha, beta, ply);
         }
+        // Check extension: search one ply deeper when in check, since forcing
+        // lines resolve slowly and are cheap (few legal replies).
         let in_check = b.in_check(b.side);
         let depth = depth.saturating_add(in_check as u8);
         let original = alpha;
+        // Transposition-table cutoff: a stored result searched at least as deep
+        // as needed can end this node outright when its bound is conclusive.
         let tt = self.tt.get(b.hash, ply);
         if let Some(e) = tt
             && e.depth >= depth
@@ -529,24 +661,34 @@ impl Engine {
                 _ => {}
             }
         }
+        // Static evaluation, reused from the TT when available. Not meaningful
+        // in check (the side to move may be losing the king next).
         let static_eval = if in_check {
             None
         } else {
             tt.and_then(|entry| entry.static_eval)
                 .or_else(|| i16::try_from(evaluate(b)).ok())
         };
+        // Reverse futility pruning: in a shallow non-PV node, if the static eval
+        // already exceeds beta by a depth-scaled margin, assume the opponent
+        // cannot claw it all back and cut off.
         if !node.pv && !in_check && depth <= RFP_MAX_DEPTH && beta.abs() < MATE - 64 {
             let margin = RFP_MARGIN * i32::from(depth);
             if i32::from(static_eval.unwrap()) - margin >= beta {
                 return i32::from(static_eval.unwrap()) - margin;
             }
         }
+        // Null-move pruning: let the opponent move twice in a row (via a reduced
+        // search). If we still hold above beta, the position is so good that the
+        // real move will too. Skipped without non-pawn material, where zugzwang
+        // makes "passing" misleading.
         if node.allow_null
             && !node.pv
             && !in_check
             && depth >= 3
             && has_non_pawn_material(b, b.side)
         {
+            // Reduce the null search more when there is more depth to spare.
             let reduction = if depth > 10 {
                 4
             } else if depth > 6 {
@@ -573,16 +715,21 @@ impl Engine {
                 return 0;
             }
             if score >= beta {
+                // Don't return an unproven mate score from a null search.
                 if score >= MATE - 64 {
                     score = beta;
                 }
                 return score;
             }
         }
+        // No legal moves: checkmate (scored by ply, so faster mates win) or
+        // stalemate (a draw).
         let mut moves = b.legal_moves();
         if moves.is_empty() {
             return if in_check { -MATE + ply as i32 } else { 0 };
         }
+        // Order the moves, then float the transposition-table best move to the
+        // very front — it is the single strongest ordering hint available.
         self.order(b, &mut moves, ply as usize);
         if let Some(e) = tt
             && let Some(i) = moves.iter().position(|m| {
@@ -597,6 +744,8 @@ impl Engine {
             let capture = b.piece_at(m.to).is_some() || m.en_passant;
             self.hashes.push(b.hash);
             let undo = b.make_move(m);
+            // Late-move reduction: quiet moves ordered late in a non-PV node are
+            // searched one ply shallower first, on the bet that they will fail low.
             let reduction = if depth >= 3 && i >= 4 && !node.pv && !capture && !in_check {
                 1
             } else {
@@ -613,6 +762,8 @@ impl Engine {
                     allow_null: true,
                 },
             );
+            // Re-search at full depth/window if a reduced or scout search beat
+            // alpha, since its result may have been an underestimate.
             if score > alpha && (reduction > 0 || node.pv) {
                 score = -self.negamax(
                     b,
@@ -638,6 +789,9 @@ impl Engine {
             if score > alpha {
                 alpha = score
             }
+            // Beta cutoff: this move is too good, the opponent will avoid it.
+            // Reward the quiet move that caused it (history and killers) so it is
+            // tried earlier in sibling nodes.
             if alpha >= beta {
                 if !capture && (ply as usize) < 64 {
                     self.history[m.from as usize][m.to as usize] += (depth as i32).pow(2);
@@ -647,6 +801,8 @@ impl Engine {
                 break;
             }
         }
+        // Classify the result relative to the original window so the stored
+        // bound is interpreted correctly on a later probe.
         let bound = if best_score <= original {
             BOUND_UPPER
         } else if best_score >= beta {
@@ -667,6 +823,10 @@ impl Engine {
         );
         best_score
     }
+    /// Quiescence search: extends the search past the horizon along forcing
+    /// moves (captures, and all evasions when in check) so that the static
+    /// evaluation is only trusted in "quiet" positions. This is what prevents
+    /// the horizon effect of stopping in the middle of a capture sequence.
     fn qsearch(&mut self, b: &mut Board, mut alpha: i32, beta: i32, ply: u8) -> i32 {
         self.nodes += 1;
         self.seldepth = self.seldepth.max(ply);
@@ -679,6 +839,8 @@ impl Engine {
             return evaluate(b);
         }
         let in_check = b.in_check(b.side);
+        // "Stand pat": the score for making no capture at all. When not in check
+        // it establishes a lower bound — the side to move can always decline.
         let stand = self
             .tt
             .get(b.hash, ply)
@@ -692,6 +854,8 @@ impl Engine {
                 alpha = stand
             }
         }
+        // In check every legal move must be considered (it may be the only
+        // escape); otherwise only captures are examined.
         let moves = if in_check {
             b.legal_moves()
         } else {
@@ -702,9 +866,12 @@ impl Engine {
         }
         for m in moves {
             if !in_check {
+                // Skip captures that lose material by SEE...
                 if m.promotion.is_none() && static_exchange_eval(b, m) < 0 {
                     continue;
                 }
+                // ...and delta-prune captures that cannot lift alpha even with a
+                // generous margin.
                 let gain = b.piece_at(m.to).map_or(100, |p| piece_value(p.kind));
                 if stand + gain + 200 < alpha {
                     continue;
@@ -722,6 +889,10 @@ impl Engine {
         }
         alpha
     }
+    /// Sorts moves best-first to maximize alpha-beta cutoffs. The ranking, from
+    /// highest: winning/equal captures (by SEE), then losing captures, then
+    /// promotions, then the two killer moves, and finally quiet moves by their
+    /// history score.
     fn order(&self, b: &Board, moves: &mut [Move], ply: usize) {
         moves.sort_unstable_by_key(|m| {
             std::cmp::Reverse(if b.piece_at(m.to).is_some() || m.en_passant {
@@ -742,6 +913,9 @@ impl Engine {
             })
         })
     }
+    /// Reconstructs the principal variation by walking the transposition table:
+    /// repeatedly follow each position's stored best move. Stops at the first
+    /// position with no entry or no matching legal move (e.g. an overwritten slot).
     fn extract_pv(&self, b: &Board, depth: u8) -> Vec<Move> {
         let mut b = b.clone();
         let mut pv = vec![];
@@ -761,6 +935,9 @@ impl Engine {
     }
 }
 
+/// Packs a move into 16 bits for compact TT storage: 6 bits `from`, 6 bits
+/// `to`, 3 bits promotion. The en-passant and castle flags are not stored; they
+/// are re-derived when the move is matched against the position's legal moves.
 fn pack_move(chess_move: Move) -> u16 {
     let promotion = match chess_move.promotion {
         None => 0,
@@ -789,6 +966,8 @@ fn unpack_move(packed: u16) -> Move {
     }
 }
 
+/// Whether `color` has any piece other than pawns and the king — the guard for
+/// null-move pruning, which is unsound in pawn-only endgames prone to zugzwang.
 fn has_non_pawn_material(board: &Board, color: crate::Color) -> bool {
     [
         PieceKind::Knight,
@@ -800,6 +979,11 @@ fn has_non_pawn_material(board: &Board, color: crate::Color) -> bool {
     .any(|kind| board.pieces(color, kind) != 0)
 }
 
+// Mate scores encode the distance to mate, so they must be made relative to the
+// current node before storing and back to the caller's ply on retrieval;
+// otherwise a mate found deep in the tree would report the wrong distance when
+// probed from a different ply. `score_to_tt`/`score_from_tt` handle that ply
+// shift; `pack`/`unpack` additionally compress into the slot's i16.
 fn score_to_tt(score: i32, ply: u8) -> i32 {
     if score >= MATE - 64 {
         score + i32::from(ply)

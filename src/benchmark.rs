@@ -1,6 +1,15 @@
+//! Deterministic benchmark subcommands, invoked as `chess bench <mode>`.
+//!
+//! Each mode uses fixed depth and a fresh engine (64 MB hash), so node counts,
+//! scores, and PVs are reproducible and can be diffed against the GoChess
+//! reference — only wall time and NPS are machine-dependent. See `README.md`
+//! and `bench/BASELINE.md` for how these numbers are used.
+
 use crate::{Board, Engine, Move, SearchLimits};
 use std::{fs, path::Path, time::Instant};
 
+/// Perft positions with their expected leaf-node totals at a given depth. A
+/// mismatch is a move-generation bug, so the totals are asserted, not just printed.
 const PERFT: &[(&str, &str, u8, u64)] = &[
     (
         "startpos",
@@ -22,6 +31,7 @@ const PERFT: &[(&str, &str, u8, u64)] = &[
     ),
 ];
 
+/// Fixed positions searched by `bench search` to compare search node counts.
 const SEARCH: &[(&str, &str)] = &[
     (
         "startpos",
@@ -37,6 +47,9 @@ const SEARCH: &[(&str, &str)] = &[
     ),
 ];
 
+/// Dispatches the `bench` subcommand. Returns `Ok(true)` when a benchmark ran
+/// (so `main` should exit), `Ok(false)` when the arguments are not a `bench`
+/// command and normal UCI startup should proceed.
 pub fn run(args: &[String]) -> Result<bool, String> {
     if args.first().map(String::as_str) != Some("bench") {
         return Ok(false);
@@ -118,6 +131,9 @@ fn bench_search(depth: u8) -> Result<(), String> {
     Ok(())
 }
 
+/// Runs an EPD tactical suite (e.g. Bratko-Kopec, WAC): search each position and
+/// count how many best moves match the `bm` operation. Blank and comment lines
+/// are skipped. Used as a diagnostic, not as Elo evidence.
 fn bench_epd(path: &Path, depth: u8) -> Result<(), String> {
     let input = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut solved = 0usize;
@@ -157,6 +173,9 @@ fn bench_epd(path: &Path, depth: u8) -> Result<(), String> {
     Ok(())
 }
 
+/// Parses one EPD line into a position, its accepted best moves, and its id.
+/// EPD omits the move clocks, so `0 1` is appended to form a full FEN; best
+/// moves are read from the `bm` operation and the label from the `id` operation.
 fn parse_epd(line: &str) -> Result<(Board, Vec<Move>, String), String> {
     let fields: Vec<_> = line.split_whitespace().collect();
     if fields.len() < 6 {
