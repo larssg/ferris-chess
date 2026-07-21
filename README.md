@@ -59,6 +59,7 @@ cargo build --release
 ./target/release/chess bench bk 6
 ./bench/fetch-wac.sh
 ./target/release/chess bench wac 6
+./bench/fetch-openings.sh
 ```
 
 All search modes use fixed depth and fresh 64 MB hash tables, making node
@@ -70,3 +71,5 @@ machine-dependent. Suite provenance is recorded in `bench/ATTRIBUTION.md`.
 `bench/run-sprt.sh` runs the planned fixed-seed, reversed-color Cute Chess
 SPRT and builds the pinned reference automatically. `OPENINGS` must point at
 `8moves_v3.pgn` if it is not installed at `bench/data/8moves_v3.pgn`.
+`bench/fetch-openings.sh` installs that exact checksum-verified file from the
+official Stockfish books repository.

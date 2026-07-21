@@ -93,3 +93,22 @@ reductions and internal iterative reduction produced:
 The final LMR/IIR step reduced nodes by 4.5% with all depth-4 scores, best
 moves, and PVs unchanged. Relative to the null-move/reverse-futility checkpoint,
 the combined shallow-pruning and reduction work cut the node count by 56.5%.
+
+## First non-inferiority SPRT
+
+Run on 2026-07-21 with Cute Chess 1.4.0, the checksum-verified Stockfish
+`8moves_v3.pgn`, a fixed seed, reversed colors, one thread per engine, 64 MB
+hash, and 10+0.1 time control. The sequential test reached its lower boundary
+after 35 games:
+
+```text
+FerrisChess vs GoChess: 1 win, 24 losses, 10 draws
+Elo difference: -273.7 +/- 116.9
+SPRT: llr -3.01, lower bound -2.94, upper bound 2.94
+Result: H0 accepted; the +0 to +20 Elo non-inferiority gate failed
+```
+
+FerrisChess scored 25.0% as White and 8.8% as Black. The PGN showed no engine
+crashes, illegal moves, or time forfeits. GoChess generally reached roughly
+three more plies at similar move times, making search throughput and avoidable
+per-node work the next measured parity target.

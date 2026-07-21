@@ -131,10 +131,14 @@ Opening-book parity does not affect the explicit benchmark search path.
 
 ## Next checkpoint
 
-Port the next measured GoChess search-behavior batch:
+The first non-inferiority SPRT failed at its lower boundary after 35 games
+(1–24–10, estimated -273.7 +/- 116.9 Elo, LLR -3.01). The match was
+protocol-clean, but GoChess generally searched roughly three plies deeper at
+similar move times.
 
-1. Run the first Cute Chess non-inferiority SPRT and use its result to select
-   any remaining parity work.
+Profile and remove the largest search-throughput costs, starting with board
+state rebuilding, evaluation rescans, and move-list allocation. Preserve exact
+evaluation, SEE, fixed-depth scores, best moves, and deterministic node counts.
 
 Re-run fixed-depth differential benchmarks after each coherent batch. Require
 an SPRT non-inferiority result before superiority experiments.
@@ -199,8 +203,8 @@ reference draw/resign adjudication
 
 Use `bench/build-gochess.sh` to verify and build the pinned reference,
 `bench/fetch-wac.sh` to install the exact checksum-verified WAC input, and
-`bench/run-sprt.sh` for the match gate. The opening file must be supplied as
-`bench/data/8moves_v3.pgn` or through the `OPENINGS` environment variable.
+`bench/fetch-openings.sh` to install the checksum-verified Stockfish opening
+file. Then use `bench/run-sprt.sh` for the match gate.
 
 ## Scope assumptions
 
