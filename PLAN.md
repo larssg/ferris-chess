@@ -188,6 +188,16 @@ was verified by diffing old-versus-new deterministic outputs for depth-11
 search (1,831,720 nodes), all 24 BK positions at depth 6, and all 300 WAC
 positions at depth 5. Depth 9 fell to 233--248 ms (up to roughly 2.21M NPS)
 with perft exact.
+The legality filter then became pin-aware: checkers and absolutely pinned
+pieces are computed once per generation from the ray tables (with new
+compile-time between/line tables), after which each pseudo-legal move is
+judged by bit tests — king moves against king-lifted occupancy, castling
+proven during generation, and only en passant still played out. A
+differential test holds the filter equal to the played-out definition across
+en-passant pins, double checks, and deterministic random walks. Depth 9 fell
+to 161--169 ms (up to roughly 3.20M NPS) and perft to 481 ms (41.5M NPS),
+with the same byte-identical outputs across depth-11 search, BK depth 6, and
+WAC depth 5.
 
 ## Next checkpoint
 

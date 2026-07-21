@@ -137,6 +137,20 @@ pub struct Undo {
     hash: u64,
 }
 
+/// Precomputed facts for judging move legality without playing moves out; see
+/// [`Board::legality_context`].
+struct LegalityContext {
+    /// Our king's square; `None` legalizes everything (no king, no check).
+    king: Option<u8>,
+    /// Enemy pieces currently giving check.
+    checkers: u64,
+    /// Our pieces that are absolutely pinned to the king.
+    pinned: u64,
+    /// Squares a non-king move must land on: everything when not in check, the
+    /// capture-or-block squares in single check, nothing in double check.
+    evasions: u64,
+}
+
 /// The counterpart of [`Undo`] for a null move (see [`Board::make_null_move`]),
 /// which only toggles the side to move and clears en-passant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -438,20 +452,16 @@ impl Board {
     /// Generates the fully legal moves into `out`, reusing the caller's buffer to
     /// avoid an allocation on the search's hot path.
     ///
-    /// Legality is decided the simple way: generate pseudo-legal moves, play each
-    /// on a scratch copy, and keep only those that do not leave our own king in
-    /// check. This is slower than a pin-aware generator but is easy to trust, and
-    /// perft validates it exactly.
+    /// Legality filtering is pin-aware: checkers and absolutely pinned pieces
+    /// are computed once, after which each pseudo-legal move is judged with a
+    /// few bit tests instead of being played and reversed (see
+    /// [`retain_legal`](Self::retain_legal)). Perft validates the filter
+    /// exactly, and a differential test checks it against the played-out
+    /// definition of legality.
     pub fn generate_legal_moves(&self, out: &mut Vec<Move>) {
         out.clear();
         self.generate_pseudo_moves(out, false);
-        let mut board = self.clone();
-        out.retain(|&m| {
-            let undo = board.make_move(m);
-            let legal = !board.in_check(self.side);
-            board.unmake_move(m, undo);
-            legal
-        });
+        self.retain_legal(out);
     }
     /// Convenience wrapper around [`generate_legal_moves`](Self::generate_legal_moves)
     /// that allocates a fresh vector.
@@ -471,13 +481,121 @@ impl Board {
     pub(crate) fn generate_legal_captures(&self, out: &mut Vec<Move>) {
         out.clear();
         self.generate_pseudo_moves(out, true);
-        let mut board = self.clone();
-        out.retain(|&m| {
+        self.retain_legal(out);
+    }
+
+    /// Drops the pseudo-legal moves in `out` that would leave our king in
+    /// check, preserving order. Almost every move is judged by bit tests
+    /// against the precomputed [`LegalityContext`]; only en passant falls back
+    /// to playing the move out.
+    fn retain_legal(&self, out: &mut Vec<Move>) {
+        let context = self.legality_context();
+        let mut scratch = None;
+        out.retain(|&m| self.move_is_legal(&context, m, &mut scratch));
+    }
+
+    /// The per-position facts the legality filter needs: our king, the enemy
+    /// pieces currently checking it, our absolutely pinned pieces, and where a
+    /// non-king move must land to answer a check.
+    fn legality_context(&self) -> LegalityContext {
+        let enemy = self.side.other();
+        // No king (possible in synthetic FENs) means nothing can be in check,
+        // matching the played-out definition of legality.
+        let Some(king) = self.king_square(self.side) else {
+            return LegalityContext {
+                king: None,
+                checkers: 0,
+                pinned: 0,
+                evasions: u64::MAX,
+            };
+        };
+        let occupied = self.occupied();
+        let queens = self.pieces(enemy, PieceKind::Queen);
+        let orthogonal_sliders = self.pieces(enemy, PieceKind::Rook) | queens;
+        let diagonal_sliders = self.pieces(enemy, PieceKind::Bishop) | queens;
+        let pawn_attackers = match enemy {
+            Color::White => WHITE_PAWN_ATTACKERS[king as usize],
+            Color::Black => BLACK_PAWN_ATTACKERS[king as usize],
+        };
+        let checkers = (KNIGHT_ATTACKS[king as usize] & self.pieces(enemy, PieceKind::Knight))
+            | (pawn_attackers & self.pieces(enemy, PieceKind::Pawn))
+            | (KING_ATTACKS[king as usize] & self.pieces(enemy, PieceKind::King))
+            | (rook_attacks(king, occupied) & orthogonal_sliders)
+            | (bishop_attacks(king, occupied) & diagonal_sliders);
+        // A piece is pinned when it is the first blocker on a ray from the
+        // king and the next blocker beyond it is an enemy slider of that
+        // ray's kind.
+        let own = self.occupancy[color_index(self.side)];
+        let mut pinned = 0;
+        for (rays, sliders) in [
+            (&ORTHOGONAL_RAYS, orthogonal_sliders),
+            (&DIAGONAL_RAYS, diagonal_sliders),
+        ] {
+            for ray in rays {
+                if let Some(first) = ray.first_blocker(king, occupied)
+                    && own & (1u64 << first) != 0
+                    && let Some(second) = ray.first_blocker(first, occupied)
+                    && sliders & (1u64 << second) != 0
+                {
+                    pinned |= 1u64 << first;
+                }
+            }
+        }
+        let evasions = match checkers.count_ones() {
+            // Not in check: land anywhere.
+            0 => u64::MAX,
+            // Single check: capture the checker, or block a slider's ray.
+            1 => checkers | BETWEEN[king as usize][checkers.trailing_zeros() as usize],
+            // Double check: no single non-king move can answer both.
+            _ => 0,
+        };
+        LegalityContext {
+            king: Some(king),
+            checkers,
+            pinned,
+            evasions,
+        }
+    }
+
+    /// Whether one pseudo-legal move leaves our king safe. `scratch` lazily
+    /// holds a clone of `self` for the en-passant fallback.
+    fn move_is_legal(
+        &self,
+        context: &LegalityContext,
+        m: Move,
+        scratch: &mut Option<Board>,
+    ) -> bool {
+        let Some(king) = context.king else {
+            return true;
+        };
+        if m.en_passant {
+            // En passant clears two squares of one rank at once — the one case
+            // the ray reasoning below does not cover (a rank ray through both
+            // pawns may uncover the king). Play it out instead; it is rare.
+            let board = scratch.get_or_insert_with(|| self.clone());
             let undo = board.make_move(m);
             let legal = !board.in_check(self.side);
             board.unmake_move(m, undo);
-            legal
-        });
+            return legal;
+        }
+        if m.from == king {
+            // Castling proved the king's start, path, and destination safe
+            // during generation.
+            if m.castle {
+                return true;
+            }
+            // Lift the king so a checker's ray extends through its old square.
+            let occupied = self.occupied() ^ (1u64 << m.from);
+            return !self.square_attacked_with(m.to, self.side.other(), occupied);
+        }
+        if context.pinned & (1u64 << m.from) != 0 {
+            // A pinned piece may only slide along its pin line, and while in
+            // check it cannot help at all: the check ray and the pin line only
+            // meet at the king's own square.
+            return context.checkers == 0
+                && LINE[king as usize][m.from as usize] & (1u64 << m.to) != 0;
+        }
+        context.evasions & (1u64 << m.to) != 0
     }
 
     /// Generates pseudo-legal moves for the side to move — moves that respect
@@ -835,6 +953,12 @@ impl Board {
     /// adjacent king squares. Every geometry is a precomputed mask, so each
     /// check is a handful of bit operations.
     pub fn square_attacked(&self, sq: u8, by: Color) -> bool {
+        self.square_attacked_with(sq, by, self.occupied())
+    }
+    /// [`square_attacked`](Self::square_attacked) against an explicit blocker
+    /// set. The legality filter lifts the moving king out of `occupied` so a
+    /// sliding checker's ray extends through the square the king vacates.
+    fn square_attacked_with(&self, sq: u8, by: Color, occupied: u64) -> bool {
         if KNIGHT_ATTACKS[sq as usize] & self.pieces(by, PieceKind::Knight) != 0 {
             return true;
         }
@@ -848,7 +972,6 @@ impl Board {
         }
         // Sliding attackers: orthogonal rays can hold a rook or queen, diagonal
         // rays a bishop or queen. Each ray stops at the first occupied square.
-        let occupied = self.occupied();
         let queens = self.pieces(by, PieceKind::Queen);
         if rook_attacks(sq, occupied) & (self.pieces(by, PieceKind::Rook) | queens) != 0 {
             return true;
@@ -1149,18 +1272,95 @@ const QUEEN_MOVE_RAYS: [Ray; 8] = [
     EAST, WEST, NORTH, SOUTH, NORTH_EAST, SOUTH_EAST, NORTH_WEST, SOUTH_WEST,
 ];
 
+/// `BETWEEN[a][b]`: the squares strictly between `a` and `b` when they share a
+/// rank, file, or diagonal; empty otherwise. Blocking a slider's check means
+/// landing in `BETWEEN[king][checker]`.
+static BETWEEN: [[u64; 64]; 64] = build_between();
+
+/// `LINE[a][b]`: every square of the full rank, file, or diagonal through `a`
+/// and `b` (including both), or empty if they are not aligned. A piece pinned
+/// to the king may only move along `LINE[king][pin]`.
+static LINE: [[u64; 64]; 64] = build_line();
+
+const ALL_DIRECTIONS: [(i8, i8); 8] = [
+    (0, 1),
+    (0, -1),
+    (1, 0),
+    (-1, 0),
+    (1, 1),
+    (1, -1),
+    (-1, 1),
+    (-1, -1),
+];
+
+const fn build_between() -> [[u64; 64]; 64] {
+    let mut between = [[0u64; 64]; 64];
+    let mut a = 0;
+    while a < 64 {
+        let mut dir = 0;
+        while dir < 8 {
+            let (df, dr) = ALL_DIRECTIONS[dir];
+            // Walk outward from `a`; the squares passed so far are exactly the
+            // ones strictly between `a` and the square just reached.
+            let mut passed = 0u64;
+            let mut file = (a % 8) as i8 + df;
+            let mut rank = (a / 8) as i8 + dr;
+            while file >= 0 && file < 8 && rank >= 0 && rank < 8 {
+                let b = (rank * 8 + file) as usize;
+                between[a][b] = passed;
+                passed |= 1u64 << b;
+                file += df;
+                rank += dr;
+            }
+            dir += 1;
+        }
+        a += 1;
+    }
+    between
+}
+
+const fn build_line() -> [[u64; 64]; 64] {
+    let mut line = [[0u64; 64]; 64];
+    let mut a = 0;
+    while a < 64 {
+        // Each direction pair spans one full line through `a`.
+        let mut dir = 0;
+        while dir < 8 {
+            let (df, dr) = ALL_DIRECTIONS[dir];
+            let full = ray_mask(a, df, dr) | ray_mask(a, -df, -dr) | 1u64 << a;
+            let mut file = (a % 8) as i8 + df;
+            let mut rank = (a / 8) as i8 + dr;
+            while file >= 0 && file < 8 && rank >= 0 && rank < 8 {
+                line[a][(rank * 8 + file) as usize] = full;
+                file += df;
+                rank += dr;
+            }
+            dir += 1;
+        }
+        a += 1;
+    }
+    line
+}
+
+/// The ray mask from `square` toward one direction, to the board edge.
+const fn ray_mask(square: usize, df: i8, dr: i8) -> u64 {
+    let mut mask = 0u64;
+    let mut file = (square % 8) as i8 + df;
+    let mut rank = (square / 8) as i8 + dr;
+    while file >= 0 && file < 8 && rank >= 0 && rank < 8 {
+        mask |= 1u64 << (rank * 8 + file);
+        file += df;
+        rank += dr;
+    }
+    mask
+}
+
 /// Builds one direction's ray masks at compile time.
 const fn ray_table(df: i8, dr: i8) -> [u64; 64] {
     let mut table = [0u64; 64];
     let mut square = 0;
     while square < 64 {
-        let mut file = (square % 8) as i8 + df;
-        let mut rank = (square / 8) as i8 + dr;
-        while file >= 0 && file < 8 && rank >= 0 && rank < 8 {
-            table[square] |= 1u64 << (rank * 8 + file);
-            file += df;
-            rank += dr;
-        }
+        table[square] = ray_mask(square, df, dr);
         square += 1;
     }
     table
@@ -1462,6 +1662,76 @@ mod tests {
                 let undo = board.make_move(chess_move);
                 board.unmake_move(chess_move, undo);
                 assert_eq!(board, original, "failed to restore {chess_move} from {fen}");
+            }
+        }
+    }
+
+    /// Legality by definition: play each pseudo-legal move and keep it only if
+    /// our king is not left in check. The pin-aware filter must match this
+    /// exactly.
+    fn played_out_legal_moves(board: &Board, captures_only: bool) -> Vec<Move> {
+        let mut moves = Vec::new();
+        board.generate_pseudo_moves(&mut moves, captures_only);
+        let mut scratch = board.clone();
+        moves.retain(|&m| {
+            let undo = scratch.make_move(m);
+            let legal = !scratch.in_check(board.side);
+            scratch.unmake_move(m, undo);
+            legal
+        });
+        moves
+    }
+
+    #[test]
+    fn pin_aware_filter_matches_played_out_legality() {
+        let fens = [
+            // Ordinary opening and the tactical Kiwipete standard.
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 7 19",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R b KQkq - 7 19",
+            // En passant capture legal: no pin behind it.
+            "8/8/8/8/k2Pp3/8/8/4K3 b - d3 0 1",
+            // En passant capture illegal: both pawns leave the fourth rank and
+            // uncover the king to the rook.
+            "8/8/8/8/k2Pp2R/8/8/4K3 b - d3 0 1",
+            // The Chess Programming Wiki's en-passant/pin tangles.
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 b - - 0 1",
+            "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            // Double check: only king moves answer.
+            "4k3/8/8/8/7b/5n2/8/4K3 w - - 0 1",
+            // Checked by a slider: block, capture, or step off the ray.
+            "4k3/8/8/8/8/8/8/4R2K b - - 0 1",
+            // A full complement of pins on both wings.
+            "3r4/8/8/b2q4/8/2NPB3/3K4/8 w - - 0 1",
+        ];
+        for fen in fens {
+            // Walk a deterministic pseudo-random game from each start, holding
+            // the filters equal at every position along the way.
+            let mut board = Board::from_fen(fen).unwrap();
+            let mut seed = 0x9e3779b97f4a7c15u64;
+            for ply in 0..40 {
+                let legal = board.legal_moves();
+                assert_eq!(
+                    legal,
+                    played_out_legal_moves(&board, false),
+                    "legal moves diverged at ply {ply} of {fen} ({})",
+                    board.to_fen()
+                );
+                assert_eq!(
+                    board.legal_captures(),
+                    played_out_legal_moves(&board, true),
+                    "captures diverged at ply {ply} of {fen} ({})",
+                    board.to_fen()
+                );
+                if legal.is_empty() {
+                    break;
+                }
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                board.make_move(legal[(seed >> 33) as usize % legal.len()]);
             }
         }
     }
