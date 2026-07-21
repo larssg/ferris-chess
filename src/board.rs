@@ -24,6 +24,32 @@ pub enum PieceKind {
     Queen,
     King,
 }
+impl PieceKind {
+    /// The piece's lowercase letter, as used in FEN and UCI notation.
+    pub const fn letter(self) -> char {
+        match self {
+            Self::Pawn => 'p',
+            Self::Knight => 'n',
+            Self::Bishop => 'b',
+            Self::Rook => 'r',
+            Self::Queen => 'q',
+            Self::King => 'k',
+        }
+    }
+
+    /// The piece named by a FEN/UCI letter, in either case (`'N'` or `'n'`).
+    pub fn from_letter(letter: char) -> Option<Self> {
+        Some(match letter.to_ascii_lowercase() {
+            'p' => Self::Pawn,
+            'n' => Self::Knight,
+            'b' => Self::Bishop,
+            'r' => Self::Rook,
+            'q' => Self::Queen,
+            'k' => Self::King,
+            _ => return None,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Piece {
@@ -47,13 +73,7 @@ impl fmt::Display for Move {
         }
         write!(f, "{}{}", square_name(self.from), square_name(self.to))?;
         if let Some(p) = self.promotion {
-            f.write_str(match p {
-                PieceKind::Queen => "q",
-                PieceKind::Rook => "r",
-                PieceKind::Bishop => "b",
-                PieceKind::Knight => "n",
-                _ => "",
-            })?;
+            write!(f, "{}", p.letter())?;
         }
         Ok(())
     }
@@ -121,15 +141,8 @@ impl Board {
                     } else {
                         Color::Black
                     };
-                    let kind = match ch.to_ascii_lowercase() {
-                        'p' => PieceKind::Pawn,
-                        'n' => PieceKind::Knight,
-                        'b' => PieceKind::Bishop,
-                        'r' => PieceKind::Rook,
-                        'q' => PieceKind::Queen,
-                        'k' => PieceKind::King,
-                        _ => return Err(format!("invalid piece {ch}")),
-                    };
+                    let kind =
+                        PieceKind::from_letter(ch).ok_or_else(|| format!("invalid piece {ch}"))?;
                     squares[(7 - ri) * 8 + file] = Some(Piece { color, kind });
                     file += 1;
                 }
@@ -201,17 +214,11 @@ impl Board {
                             placement.push(char::from_digit(empty, 10).unwrap());
                             empty = 0
                         }
-                        let mut c = match p.kind {
-                            PieceKind::Pawn => 'p',
-                            PieceKind::Knight => 'n',
-                            PieceKind::Bishop => 'b',
-                            PieceKind::Rook => 'r',
-                            PieceKind::Queen => 'q',
-                            PieceKind::King => 'k',
+                        let c = if p.color == Color::White {
+                            p.kind.letter().to_ascii_uppercase()
+                        } else {
+                            p.kind.letter()
                         };
-                        if p.color == Color::White {
-                            c = c.to_ascii_uppercase()
-                        }
                         placement.push(c)
                     }
                 }
@@ -247,13 +254,11 @@ impl Board {
         }
         let from = parse_square(&t[0..2])?;
         let to = parse_square(&t[2..4])?;
-        let promo = t.as_bytes().get(4).and_then(|c| match c {
-            b'q' => Some(PieceKind::Queen),
-            b'r' => Some(PieceKind::Rook),
-            b'b' => Some(PieceKind::Bishop),
-            b'n' => Some(PieceKind::Knight),
-            _ => None,
-        });
+        let promo = t
+            .chars()
+            .nth(4)
+            .and_then(PieceKind::from_letter)
+            .filter(|kind| !matches!(kind, PieceKind::Pawn | PieceKind::King));
         self.legal_moves().into_iter().find(|m| {
             m.from == from
                 && m.to == to
@@ -284,14 +289,7 @@ impl Board {
         let capture = chess_move.en_passant || self.piece_at(chess_move.to).is_some();
         let mut san = String::new();
         if piece.kind != PieceKind::Pawn {
-            san.push(match piece.kind {
-                PieceKind::Knight => 'N',
-                PieceKind::Bishop => 'B',
-                PieceKind::Rook => 'R',
-                PieceKind::Queen => 'Q',
-                PieceKind::King => 'K',
-                PieceKind::Pawn => unreachable!(),
-            });
+            san.push(piece.kind.letter().to_ascii_uppercase());
             let alternatives: Vec<_> = self
                 .legal_moves()
                 .into_iter()
@@ -326,19 +324,25 @@ impl Board {
         san.push_str(&square_name(chess_move.to));
         if let Some(promotion) = chess_move.promotion {
             san.push('=');
-            san.push(match promotion {
-                PieceKind::Knight => 'N',
-                PieceKind::Bishop => 'B',
-                PieceKind::Rook => 'R',
-                PieceKind::Queen => 'Q',
-                PieceKind::Pawn | PieceKind::King => unreachable!(),
-            });
+            san.push(promotion.letter().to_ascii_uppercase());
         }
         san
     }
 
     pub fn piece_at(&self, square: u8) -> Option<Piece> {
         self.squares.get(square as usize).copied().flatten()
+    }
+
+    /// The square of `color`'s king, or `None` if it is absent (e.g. mid-analysis positions).
+    pub fn king_square(&self, color: Color) -> Option<u8> {
+        let king = Piece {
+            color,
+            kind: PieceKind::King,
+        };
+        self.squares
+            .iter()
+            .position(|&p| p == Some(king))
+            .map(|sq| sq as u8)
     }
 
     pub fn pieces(&self, color: Color, kind: PieceKind) -> u64 {
@@ -674,15 +678,8 @@ impl Board {
     }
 
     pub fn in_check(&self, color: Color) -> bool {
-        self.squares
-            .iter()
-            .position(|p| {
-                *p == Some(Piece {
-                    color,
-                    kind: PieceKind::King,
-                })
-            })
-            .is_some_and(|sq| self.square_attacked(sq as u8, color.other()))
+        self.king_square(color)
+            .is_some_and(|sq| self.square_attacked(sq, color.other()))
     }
     pub fn square_attacked(&self, sq: u8, by: Color) -> bool {
         let f = (sq % 8) as i8;

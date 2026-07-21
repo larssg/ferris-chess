@@ -179,13 +179,7 @@ fn pawn_structure(pawns: &[u8], opponents: &[u8], color: Color) -> i32 {
 }
 
 fn king_safety(board: &Board, color: Color, pawns: &[u8]) -> i32 {
-    let Some(king) = (0..64).find(|&sq| {
-        board.piece_at(sq)
-            == Some(Piece {
-                color,
-                kind: PieceKind::King,
-            })
-    }) else {
+    let Some(king) = board.king_square(color) else {
         return 0;
     };
     let file = i32::from(king % 8);
@@ -240,14 +234,11 @@ fn rooks(board: &Board, color: Color) -> i32 {
         let seventh = if color == Color::White { 6 } else { 1 };
         if sq / 8 == seventh {
             score += ROOK_SEVENTH;
-            if (0..64).any(|ksq| {
-                board.piece_at(ksq)
-                    == Some(Piece {
-                        color: color.other(),
-                        kind: PieceKind::King,
-                    })
-                    && ksq / 8 == if color == Color::White { 7 } else { 0 }
-            }) {
+            let back_rank = if color == Color::White { 7 } else { 0 };
+            if board
+                .king_square(color.other())
+                .is_some_and(|ksq| ksq / 8 == back_rank)
+            {
                 score += ROOK_TRAPS_KING;
             }
         }
@@ -264,16 +255,8 @@ fn mop_up(board: &Board, material: i32) -> i32 {
     } else {
         Color::Black
     };
-    let king = |color| {
-        (0..64).find(|&sq| {
-            board.piece_at(sq)
-                == Some(Piece {
-                    color,
-                    kind: PieceKind::King,
-                })
-        })
-    };
-    let (Some(wk), Some(lk)) = (king(winner), king(winner.other())) else {
+    let (Some(wk), Some(lk)) = (board.king_square(winner), board.king_square(winner.other()))
+    else {
         return 0;
     };
     let (lx, ly) = (i32::from(lk % 8), i32::from(lk / 8));
