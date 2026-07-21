@@ -218,6 +218,15 @@ With parity exceeded, remaining work moves to the superiority experiments and
 finalization milestones below. Keep every experiment in an isolated commit and
 retain only changes that hold up in their own match results.
 
+Superiority experiments gate by self-play SPRT against the previous commit's
+binary at 5+0.05 with eight concurrent games, `elo0=0 elo1=10`, and the
+standard openings and adjudication. Completed experiments:
+
+- Continuation history (one- and two-ply reply tables) plus capture history:
+  accepted at the upper bound after 1,474 games, 494–410–570 (52.8%),
+  estimated +19.8 +/- 13.9 Elo, LLR 2.95. Depth-9 benchmark nodes fell from
+  514,650 to 479,976 with unchanged best moves.
+
 ## Remaining milestones
 
 ### GoChess parity

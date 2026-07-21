@@ -1511,7 +1511,7 @@ const fn color_index(color: Color) -> usize {
 
 /// Maps a piece to its 0..12 slot in the `pieces` array: white pieces occupy
 /// slots 0..6, black 6..12, ordered by [`PieceKind`].
-const fn piece_index(piece: Piece) -> usize {
+pub(crate) const fn piece_index(piece: Piece) -> usize {
     color_index(piece.color) * 6 + piece.kind as usize - 1
 }
 

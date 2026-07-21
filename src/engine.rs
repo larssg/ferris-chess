@@ -38,6 +38,10 @@ const LMP_THRESHOLD: [usize; 6] = [0, 4, 6, 10, 15, 21];
 const LMR_FULL_MOVES: usize = 4;
 const LMR_MIN_DEPTH: u8 = 3;
 const HISTORY_MAX: i32 = 16_384;
+/// One continuation-history dimension: every (piece, destination) pair.
+const PIECE_TO: usize = 12 * 64;
+/// Sentinel continuation key for "no move here" (the root edge or a null move).
+const NO_PIECE_TO: u16 = u16::MAX;
 
 /// Reference logarithmic LMR formula. Inputs are clamped because reductions
 /// beyond the search's 64-ply horizon are never useful.
@@ -362,6 +366,17 @@ pub struct Engine {
     /// `history[from][to]`: a running bonus for quiet moves that caused cutoffs,
     /// used as a move-ordering tiebreak.
     history: [[i32; 64]; 64],
+    /// Continuation history: how well each (piece, destination) has performed
+    /// immediately after (`[0]`) or two plies after (`[1]`) a given previous
+    /// (piece, destination). Adds reply context that the plain from/to history
+    /// cannot see.
+    continuation_history: [Box<[[i32; PIECE_TO]]>; 2],
+    /// `capture_history[attacker][to][victim kind]`: cutoff feedback for
+    /// captures, refining the SEE-based capture ordering.
+    capture_history: [[[i32; 6]; 64]; 12],
+    /// The (piece, destination) key of the move made at each ply — or
+    /// `NO_PIECE_TO` after a null move — indexing the continuation histories.
+    piece_to_stack: [u16; 64],
     /// Two killer moves per ply: quiet moves that recently produced a cutoff at
     /// the same depth and are tried early elsewhere.
     killers: [[Move; 2]; 64],
@@ -402,6 +417,12 @@ impl Engine {
         Self {
             tt: TranspositionTable::with_mb(64),
             history: [[0; 64]; 64],
+            continuation_history: [
+                vec![[0; PIECE_TO]; PIECE_TO].into_boxed_slice(),
+                vec![[0; PIECE_TO]; PIECE_TO].into_boxed_slice(),
+            ],
+            capture_history: [[[0; 6]; 64]; 12],
+            piece_to_stack: [NO_PIECE_TO; 64],
             killers: [[Move::default(); 2]; 64],
             counter_moves: [[Move::default(); 64]; 64],
             move_stack: [Move::default(); 64],
@@ -623,6 +644,7 @@ impl Engine {
         for (index, m) in moves.into_iter().enumerate() {
             self.hashes.push(b.hash);
             self.move_stack[0] = m;
+            self.piece_to_stack[0] = piece_to_key(b, m);
             let undo = b.make_move(m);
             let mut score = if index == 0 {
                 // Full-window search of the presumed best move.
@@ -818,6 +840,7 @@ impl Engine {
             };
             self.hashes.push(b.hash);
             self.move_stack[ply as usize] = Move::default();
+            self.piece_to_stack[ply as usize] = NO_PIECE_TO;
             let undo = b.make_null_move();
             let mut score = -self.negamax(
                 b,
@@ -875,6 +898,8 @@ impl Engine {
         let can_lmp = !in_check && !node.pv && depth <= 5;
         let mut quiet_moves = [Move::default(); 256];
         let mut quiet_count = 0;
+        let mut capture_moves = [Move::default(); 64];
+        let mut capture_count = 0;
         for (i, m) in moves.iter().copied().enumerate() {
             let capture = b.piece_at(m.to).is_some() || m.en_passant;
             let quiet = !capture && m.promotion.is_none();
@@ -897,9 +922,13 @@ impl Engine {
             if quiet {
                 quiet_moves[quiet_count] = m;
                 quiet_count += 1;
+            } else if capture && capture_count < capture_moves.len() {
+                capture_moves[capture_count] = m;
+                capture_count += 1;
             }
             self.hashes.push(b.hash);
             self.move_stack[ply as usize] = m;
+            self.piece_to_stack[ply as usize] = piece_to_key(b, m);
             let undo = b.make_move(m);
             // Logarithmic late-move reduction: search late quiets at reduced
             // depth with a null window. A result above alpha is verified at
@@ -1003,15 +1032,15 @@ impl Engine {
             // Reward the quiet move that caused it (history and killers) so it is
             // tried earlier in sibling nodes.
             if alpha >= beta {
+                let bonus = i32::from(depth).pow(2);
                 if quiet && (ply as usize) < 64 {
                     if self.killers[ply as usize][0] != m {
                         self.killers[ply as usize][1] = self.killers[ply as usize][0];
                         self.killers[ply as usize][0] = m;
                     }
-                    let bonus = i32::from(depth).pow(2);
-                    self.update_history(m, bonus);
-                    for failed in &quiet_moves[..quiet_count - 1] {
-                        self.update_history(*failed, -bonus);
+                    self.update_quiet_stats(b, m, ply as usize, bonus);
+                    for &failed in quiet_moves.iter().take(quiet_count - 1) {
+                        self.update_quiet_stats(b, failed, ply as usize, -bonus);
                     }
                     if ply > 0 {
                         let previous = self.move_stack[ply as usize - 1];
@@ -1019,6 +1048,17 @@ impl Engine {
                             self.counter_moves[previous.from as usize][previous.to as usize] = m;
                         }
                     }
+                }
+                // Capture feedback: reward a capturing cutoff move and demote
+                // the captures already tried before it, whoever cut off.
+                if capture {
+                    self.update_capture_stats(b, m, bonus);
+                }
+                for &failed in capture_moves
+                    .iter()
+                    .take(capture_count - usize::from(capture))
+                {
+                    self.update_capture_stats(b, failed, -bonus);
                 }
                 break;
             }
@@ -1125,9 +1165,50 @@ impl Engine {
     /// promotions, then the two killer moves, and finally quiet moves by their
     /// history score.
     fn update_history(&mut self, chess_move: Move, bonus: i32) {
-        let bonus = bonus.clamp(-HISTORY_MAX, HISTORY_MAX);
-        let history = &mut self.history[chess_move.from as usize][chess_move.to as usize];
-        *history += bonus - *history * bonus.abs() / HISTORY_MAX;
+        apply_history_gravity(
+            &mut self.history[chess_move.from as usize][chess_move.to as usize],
+            bonus,
+        );
+    }
+
+    /// Applies one cutoff outcome for a quiet move to every quiet-ordering
+    /// history: the from/to table plus both continuation tables (keyed by the
+    /// moves one and two plies back).
+    fn update_quiet_stats(&mut self, b: &Board, chess_move: Move, ply: usize, bonus: i32) {
+        self.update_history(chess_move, bonus);
+        let current = piece_to_key(b, chess_move);
+        if current == NO_PIECE_TO {
+            return;
+        }
+        for (index, table) in self.continuation_history.iter_mut().enumerate() {
+            let back = index + 1;
+            if ply >= back {
+                let previous = self.piece_to_stack[ply - back];
+                if previous != NO_PIECE_TO {
+                    apply_history_gravity(&mut table[previous as usize][current as usize], bonus);
+                }
+            }
+        }
+    }
+
+    /// Applies one cutoff outcome for a capture to the capture history.
+    fn update_capture_stats(&mut self, b: &Board, chess_move: Move, bonus: i32) {
+        let Some(attacker) = b.piece_at(chess_move.from) else {
+            return;
+        };
+        let victim = if chess_move.en_passant {
+            PieceKind::Pawn
+        } else {
+            match b.piece_at(chess_move.to) {
+                Some(piece) => piece.kind,
+                None => return,
+            }
+        };
+        apply_history_gravity(
+            &mut self.capture_history[crate::board::piece_index(attacker)][chess_move.to as usize]
+                [victim as usize - 1],
+            bonus,
+        );
     }
 
     fn order(&mut self, b: &Board, moves: &mut [Move], ply: usize) {
@@ -1137,8 +1218,17 @@ impl Engine {
         } else {
             Move::default()
         };
+        // The continuation keys of the moves one and two plies back, for the
+        // reply-aware quiet histories.
+        let previous_keys = [1, 2].map(|back| {
+            if ply >= back {
+                self.piece_to_stack[ply - back]
+            } else {
+                NO_PIECE_TO
+            }
+        });
         for &chess_move in moves.iter() {
-            let score = self.move_order_score(b, chess_move, ply, counter_move);
+            let score = self.move_order_score(b, chess_move, ply, counter_move, previous_keys);
             self.order_scores[usize::from(pack_move(chess_move))] = score;
         }
         moves.sort_unstable_by_key(|m| {
@@ -1146,15 +1236,21 @@ impl Engine {
         })
     }
 
-    fn move_order_score(&self, b: &Board, chess_move: Move, ply: usize, counter_move: Move) -> i32 {
+    fn move_order_score(
+        &self,
+        b: &Board,
+        chess_move: Move,
+        ply: usize,
+        counter_move: Move,
+        previous_keys: [u16; 2],
+    ) -> i32 {
         let capture = b.piece_at(chess_move.to).is_some() || chess_move.en_passant;
         let mut score = if capture {
+            // SEE splits winning from losing captures; the capture history
+            // refines the order within each band.
             let see = static_exchange_eval(b, chess_move);
-            if see >= 0 {
-                100_000 + see
-            } else {
-                50_000 + see
-            }
+            let band = if see >= 0 { 100_000 } else { 50_000 };
+            band + see + self.capture_order_bonus(b, chess_move)
         } else {
             0
         };
@@ -1174,8 +1270,35 @@ impl Engine {
         }
         if score == 0 {
             score = self.history[chess_move.from as usize][chess_move.to as usize];
+            let current = piece_to_key(b, chess_move);
+            if current != NO_PIECE_TO {
+                for (table, previous) in self.continuation_history.iter().zip(previous_keys) {
+                    if previous != NO_PIECE_TO {
+                        score += table[previous as usize][current as usize];
+                    }
+                }
+            }
         }
         score
+    }
+
+    /// The capture history's contribution to a capture's ordering score,
+    /// scaled down so SEE stays the primary signal.
+    fn capture_order_bonus(&self, b: &Board, chess_move: Move) -> i32 {
+        let Some(attacker) = b.piece_at(chess_move.from) else {
+            return 0;
+        };
+        let victim = if chess_move.en_passant {
+            PieceKind::Pawn
+        } else {
+            match b.piece_at(chess_move.to) {
+                Some(piece) => piece.kind,
+                None => return 0,
+            }
+        };
+        self.capture_history[crate::board::piece_index(attacker)][chess_move.to as usize]
+            [victim as usize - 1]
+            / 32
     }
     /// Reconstructs the principal variation by walking the transposition table:
     /// repeatedly follow each position's stored best move. Stops at the first
@@ -1196,6 +1319,23 @@ impl Engine {
             b.make_move(m);
         }
         pv
+    }
+}
+
+/// The bounded-gravity history update shared by every ordering history: pull
+/// the cell toward the (clamped) bonus, harder the further away it sits, so
+/// values stay within `±HISTORY_MAX` and stale signals decay.
+fn apply_history_gravity(cell: &mut i32, bonus: i32) {
+    let bonus = bonus.clamp(-HISTORY_MAX, HISTORY_MAX);
+    *cell += bonus - *cell * bonus.abs() / HISTORY_MAX;
+}
+
+/// The continuation-history key of a move: its mover and destination, or
+/// `NO_PIECE_TO` if no piece sits on `from`.
+fn piece_to_key(b: &Board, chess_move: Move) -> u16 {
+    match b.piece_at(chess_move.from) {
+        Some(piece) => (crate::board::piece_index(piece) * 64 + chess_move.to as usize) as u16,
+        None => NO_PIECE_TO,
     }
 }
 
