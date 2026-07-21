@@ -159,6 +159,15 @@ roughly 1.24M NPS) with exact evaluation and search parity preserved.
 Compile-time piece, castling, en-passant, and side hash tables then removed
 SplitMix arithmetic from make/unmake. Depth 9 fell to 400--407 ms (up to
 roughly 1.29M NPS) while retaining the engine's exact hash identities.
+A fresh profile ranked static exchange evaluation first and `square_attacked`
+fourth; both still walked mailbox rays square by square. Compile-time ray
+tables now cut each slider ray at its first blocker with one bit scan, SEE
+tracks the exchange on an occupancy bitboard instead of copying the mailbox,
+and its least-attacker probe replicates the reference's exact tie-break scan
+order so exchange sequences stay reproducible. Depth 9 fell to 309--317 ms
+(up to roughly 1.67M NPS) with identical node counts, scores, best moves, and
+PVs; the profile's next-largest costs are evaluation, `make_move`, and
+mailbox move generation.
 
 ## Next checkpoint
 

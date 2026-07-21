@@ -864,49 +864,29 @@ impl Board {
     /// *outward from the target square* along each attack geometry and asks
     /// whether the right kind of enemy piece sits at the other end — knight
     /// jumps, pawn diagonals, sliding rays (blocked by the first piece hit), and
-    /// adjacent king squares.
+    /// adjacent king squares. Every geometry is a precomputed mask, so each
+    /// check is a handful of bit operations.
     pub fn square_attacked(&self, sq: u8, by: Color) -> bool {
-        let f = (sq % 8) as i8;
-        let r = (sq / 8) as i8;
         if KNIGHT_ATTACKS[sq as usize] & self.pieces(by, PieceKind::Knight) != 0 {
             return true;
         }
         // Pawn attackers sit one rank *toward* `by`'s home side of the target.
-        let pd = if by == Color::White { -1 } else { 1 };
-        for df in [-1, 1] {
-            if offset(f, r, df, pd)
-                .is_some_and(|s| self.pieces(by, PieceKind::Pawn) & (1u64 << s) != 0)
-            {
-                return true;
-            }
+        let pawn_attackers = match by {
+            Color::White => WHITE_PAWN_ATTACKERS[sq as usize],
+            Color::Black => BLACK_PAWN_ATTACKERS[sq as usize],
+        };
+        if pawn_attackers & self.pieces(by, PieceKind::Pawn) != 0 {
+            return true;
         }
         // Sliding attackers: orthogonal rays can hold a rook or queen, diagonal
         // rays a bishop or queen. Each ray stops at the first occupied square.
         let occupied = self.occupied();
-        for (dirs, attackers) in [
-            (
-                &[(1, 0), (-1, 0), (0, 1), (0, -1)][..],
-                self.pieces(by, PieceKind::Rook) | self.pieces(by, PieceKind::Queen),
-            ),
-            (
-                &[(1, 1), (1, -1), (-1, 1), (-1, -1)][..],
-                self.pieces(by, PieceKind::Bishop) | self.pieces(by, PieceKind::Queen),
-            ),
-        ] {
-            for &(df, dr) in dirs {
-                let (mut nf, mut nr) = (f + df, r + dr);
-                while (0..8).contains(&nf) && (0..8).contains(&nr) {
-                    let bit = 1u64 << (nr * 8 + nf);
-                    if occupied & bit != 0 {
-                        if attackers & bit != 0 {
-                            return true;
-                        }
-                        break;
-                    }
-                    nf += df;
-                    nr += dr
-                }
-            }
+        let queens = self.pieces(by, PieceKind::Queen);
+        if rook_attacks(sq, occupied) & (self.pieces(by, PieceKind::Rook) | queens) != 0 {
+            return true;
+        }
+        if bishop_attacks(sq, occupied) & (self.pieces(by, PieceKind::Bishop) | queens) != 0 {
+            return true;
         }
         KING_ATTACKS[sq as usize] & self.pieces(by, PieceKind::King) != 0
     }
@@ -1014,7 +994,7 @@ fn offset(f: i8, r: i8, df: i8, dr: i8) -> Option<u8> {
     ((0..8).contains(&nf) && (0..8).contains(&nr)).then_some((nr * 8 + nf) as u8)
 }
 
-const KNIGHT_ATTACKS: [u64; 64] = attack_table(&[
+pub(crate) const KNIGHT_ATTACKS: [u64; 64] = attack_table(&[
     (-2, -1),
     (-2, 1),
     (-1, -2),
@@ -1024,7 +1004,7 @@ const KNIGHT_ATTACKS: [u64; 64] = attack_table(&[
     (2, -1),
     (2, 1),
 ]);
-const KING_ATTACKS: [u64; 64] = attack_table(&[
+pub(crate) const KING_ATTACKS: [u64; 64] = attack_table(&[
     (-1, -1),
     (-1, 0),
     (-1, 1),
@@ -1034,6 +1014,11 @@ const KING_ATTACKS: [u64; 64] = attack_table(&[
     (1, 0),
     (1, 1),
 ]);
+
+/// Squares holding a pawn of the named color that would attack the indexed
+/// square: white pawns attack from one rank below, black pawns from one above.
+pub(crate) const WHITE_PAWN_ATTACKERS: [u64; 64] = attack_table(&[(-1, -1), (1, -1)]);
+pub(crate) const BLACK_PAWN_ATTACKERS: [u64; 64] = attack_table(&[(-1, 1), (1, 1)]);
 
 /// Builds target-centric leaper masks at compile time.
 const fn attack_table(offsets: &[(i8, i8)]) -> [u64; 64] {
@@ -1055,6 +1040,124 @@ const fn attack_table(offsets: &[(i8, i8)]) -> [u64; 64] {
     }
     table
 }
+/// One sliding direction: the per-square masks of every square from there to
+/// the board edge, plus whether stepping along it increases square indices.
+/// That sign decides which end of a blocker set is the *first* blocker — the
+/// lowest bit when ascending, the highest when descending — so a single bit
+/// scan replaces walking the ray square by square.
+pub(crate) struct Ray {
+    table: &'static [u64; 64],
+    ascending: bool,
+}
+
+impl Ray {
+    /// The first occupied square along this ray from `from`, if any.
+    pub(crate) fn first_blocker(&self, from: u8, occupied: u64) -> Option<u8> {
+        let blockers = self.table[from as usize] & occupied;
+        if blockers == 0 {
+            None
+        } else if self.ascending {
+            Some(blockers.trailing_zeros() as u8)
+        } else {
+            Some((63 - blockers.leading_zeros()) as u8)
+        }
+    }
+    /// Every square a slider on `from` attacks along this ray: the whole ray,
+    /// cut just past its first blocker (captures include the blocker itself).
+    fn attacks(&self, from: u8, occupied: u64) -> u64 {
+        let ray = self.table[from as usize];
+        match self.first_blocker(from, occupied) {
+            None => ray,
+            // The blocker's own ray holds exactly the squares behind it.
+            Some(blocker) => ray ^ self.table[blocker as usize],
+        }
+    }
+}
+
+const RAY_NORTH: [u64; 64] = ray_table(0, 1);
+const RAY_SOUTH: [u64; 64] = ray_table(0, -1);
+const RAY_EAST: [u64; 64] = ray_table(1, 0);
+const RAY_WEST: [u64; 64] = ray_table(-1, 0);
+const RAY_NORTH_EAST: [u64; 64] = ray_table(1, 1);
+const RAY_NORTH_WEST: [u64; 64] = ray_table(-1, 1);
+const RAY_SOUTH_EAST: [u64; 64] = ray_table(1, -1);
+const RAY_SOUTH_WEST: [u64; 64] = ray_table(-1, -1);
+
+/// Bishop and rook directions. The order matters to static exchange
+/// evaluation, which probes rays one by one and keeps the first attacker it
+/// finds: it matches the reference's scan order so exchange sequences — and
+/// therefore search node counts — stay reproducible.
+pub(crate) const DIAGONAL_RAYS: [Ray; 4] = [
+    Ray {
+        table: &RAY_SOUTH_WEST,
+        ascending: false,
+    },
+    Ray {
+        table: &RAY_NORTH_WEST,
+        ascending: true,
+    },
+    Ray {
+        table: &RAY_SOUTH_EAST,
+        ascending: false,
+    },
+    Ray {
+        table: &RAY_NORTH_EAST,
+        ascending: true,
+    },
+];
+pub(crate) const ORTHOGONAL_RAYS: [Ray; 4] = [
+    Ray {
+        table: &RAY_WEST,
+        ascending: false,
+    },
+    Ray {
+        table: &RAY_EAST,
+        ascending: true,
+    },
+    Ray {
+        table: &RAY_SOUTH,
+        ascending: false,
+    },
+    Ray {
+        table: &RAY_NORTH,
+        ascending: true,
+    },
+];
+
+/// Builds one direction's ray masks at compile time.
+const fn ray_table(df: i8, dr: i8) -> [u64; 64] {
+    let mut table = [0u64; 64];
+    let mut square = 0;
+    while square < 64 {
+        let mut file = (square % 8) as i8 + df;
+        let mut rank = (square / 8) as i8 + dr;
+        while file >= 0 && file < 8 && rank >= 0 && rank < 8 {
+            table[square] |= 1u64 << (rank * 8 + file);
+            file += df;
+            rank += dr;
+        }
+        square += 1;
+    }
+    table
+}
+
+/// Every square a rook on `sq` attacks given `occupied` blockers.
+pub(crate) fn rook_attacks(sq: u8, occupied: u64) -> u64 {
+    let [w, e, s, n] = &ORTHOGONAL_RAYS;
+    w.attacks(sq, occupied)
+        | e.attacks(sq, occupied)
+        | s.attacks(sq, occupied)
+        | n.attacks(sq, occupied)
+}
+/// Every square a bishop on `sq` attacks given `occupied` blockers.
+pub(crate) fn bishop_attacks(sq: u8, occupied: u64) -> u64 {
+    let [sw, nw, se, ne] = &DIAGONAL_RAYS;
+    sw.attacks(sq, occupied)
+        | nw.attacks(sq, occupied)
+        | se.attacks(sq, occupied)
+        | ne.attacks(sq, occupied)
+}
+
 /// Emits sliding moves for a bishop/rook/queen: walk each direction until the
 /// edge, adding quiet moves onto empty squares and a capture onto the first
 /// enemy piece, then stop that ray.

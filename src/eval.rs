@@ -8,7 +8,7 @@
 //! This module also hosts [`static_exchange_eval`] (SEE), which the search uses
 //! to score captures without playing them out on the board.
 
-use crate::{Board, Color, Move, Piece, PieceKind};
+use crate::{Board, Color, Move, Piece, PieceKind, board};
 
 // Piece values in centipawns (pawn..king). The king's nominal 20,000 keeps it
 // from ever being "won" in SEE arithmetic.
@@ -393,28 +393,26 @@ pub fn static_exchange_eval(board: &Board, chess_move: Move) -> i32 {
         board.piece_at(chess_move.to).map(|p| p.kind)
     };
     let Some(captured) = captured else { return 0 };
-    // Work on a mutable copy of the mailbox; attackers are removed as they strike.
-    let mut squares = [None; 64];
-    for sq in 0..64 {
-        squares[sq as usize] = board.piece_at(sq);
-    }
+    // Track the exchange on a scratch occupancy bitboard; attackers are removed
+    // as they strike. Only the moving piece leaves up front — like the
+    // reference, an en-passant victim stays put and keeps blocking its file.
+    let mut occupied = board.occupied() & !(1u64 << chess_move.from);
     let mut gain = [0; 32];
     // First capture: we win the target piece; the mover becomes the next victim.
     gain[0] = piece_value(captured);
-    let mut attacker_value = piece_value(squares[chess_move.from as usize].unwrap().kind);
-    squares[chess_move.from as usize] = None;
+    let mut attacker_value = piece_value(board.piece_at(chess_move.from).unwrap().kind);
     let mut side = board.side.other();
     let mut depth = 0usize;
     while depth + 1 < gain.len() {
         // The defender recaptures with its least valuable attacker.
-        let Some((attacker, from)) = least_attacker(&squares, chess_move.to, side) else {
+        let Some((attacker, from)) = least_attacker(board, occupied, chess_move.to, side) else {
             break;
         };
         depth += 1;
         // Speculative material balance if this recapture is made.
         gain[depth] = attacker_value - gain[depth - 1];
-        attacker_value = piece_value(attacker.kind);
-        squares[from as usize] = None;
+        attacker_value = piece_value(attacker);
+        occupied &= !(1u64 << from);
         // If the side to move here is already losing either way, it stops.
         if (-gain[depth - 1]).max(gain[depth]) < 0 {
             break;
@@ -429,95 +427,90 @@ pub fn static_exchange_eval(board: &Board, chess_move: Move) -> i32 {
     gain[0]
 }
 
-/// Finds `color`'s least valuable piece that attacks `target` on the given
-/// scratch board, returning it and its square. Attackers are tried cheapest
-/// first (pawn, knight, sliders, king) so SEE recaptures in the correct order.
-/// Sliding attackers see through nothing — the first piece on a ray blocks it.
-fn least_attacker(squares: &[Option<Piece>; 64], target: u8, color: Color) -> Option<(Piece, u8)> {
-    let (tx, ty) = (i32::from(target % 8), i32::from(target / 8));
-    let at = |x: i32, y: i32| {
-        if (0..8).contains(&x) && (0..8).contains(&y) {
-            squares[(y * 8 + x) as usize]
-        } else {
-            None
-        }
-    };
+/// Finds `color`'s least valuable piece that attacks `target` among the pieces
+/// still present in `occupied`, returning its kind and square. Attackers are
+/// tried cheapest first (pawn, knight, diagonal sliders, orthogonal sliders,
+/// king). Which of several equal attackers strikes first decides which rays
+/// open up next, so ties are broken in the reference's exact scan order to
+/// keep exchange sequences — and search node counts — reproducible.
+fn least_attacker(
+    board: &Board,
+    occupied: u64,
+    target: u8,
+    color: Color,
+) -> Option<(PieceKind, u8)> {
     // Pawn: sits one rank behind the target (from the attacker's viewpoint).
-    let pawn_y = ty + if color == Color::White { -1 } else { 1 };
-    for x in [tx - 1, tx + 1] {
-        if let Some(
-            p @ Piece {
-                color: c,
-                kind: PieceKind::Pawn,
-            },
-        ) = at(x, pawn_y)
-            && c == color
-        {
-            return Some((p, (pawn_y * 8 + x) as u8));
-        }
+    // The lower-file candidate has the lower bit index, so a plain bit scan
+    // matches the reference's left-to-right preference.
+    let pawn_attackers = match color {
+        Color::White => board::WHITE_PAWN_ATTACKERS[target as usize],
+        Color::Black => board::BLACK_PAWN_ATTACKERS[target as usize],
+    };
+    let pawns = pawn_attackers & board.pieces(color, PieceKind::Pawn) & occupied;
+    if pawns != 0 {
+        return Some((PieceKind::Pawn, pawns.trailing_zeros() as u8));
     }
-    // Knight.
-    for (dx, dy) in [
-        (-2, -1),
-        (-2, 1),
-        (-1, -2),
-        (-1, 2),
-        (1, -2),
-        (1, 2),
-        (2, -1),
-        (2, 1),
-    ] {
-        if let Some(
-            p @ Piece {
-                color: c,
-                kind: PieceKind::Knight,
-            },
-        ) = at(tx + dx, ty + dy)
-            && c == color
-        {
-            return Some((p, ((ty + dy) * 8 + tx + dx) as u8));
+    // Knight. With a single knight attacker (the usual case) a bit scan
+    // suffices; several tie, and the reference's offset order picks one.
+    let knights =
+        board::KNIGHT_ATTACKS[target as usize] & board.pieces(color, PieceKind::Knight) & occupied;
+    if knights != 0 {
+        if knights & (knights - 1) == 0 {
+            return Some((PieceKind::Knight, knights.trailing_zeros() as u8));
+        }
+        let (tx, ty) = ((target % 8) as i8, (target / 8) as i8);
+        for (dx, dy) in [
+            (-2, -1),
+            (-2, 1),
+            (-1, -2),
+            (-1, 2),
+            (1, -2),
+            (1, 2),
+            (2, -1),
+            (2, 1),
+        ] {
+            let (x, y) = (tx + dx, ty + dy);
+            if (0..8).contains(&x) && (0..8).contains(&y) && knights & (1u64 << (y * 8 + x)) != 0 {
+                return Some((PieceKind::Knight, (y * 8 + x) as u8));
+            }
         }
     }
     // Sliders: diagonal rays for bishops/queens, orthogonal for rooks/queens.
-    for (dirs, kinds) in [
+    // Each ray's first blocker either is such a slider or shuts the ray.
+    let queens = board.pieces(color, PieceKind::Queen);
+    for (rays, slider, sliders) in [
         (
-            &[(-1, -1), (-1, 1), (1, -1), (1, 1)][..],
-            &[PieceKind::Bishop, PieceKind::Queen][..],
+            &board::DIAGONAL_RAYS,
+            PieceKind::Bishop,
+            board.pieces(color, PieceKind::Bishop) | queens,
         ),
         (
-            &[(-1, 0), (1, 0), (0, -1), (0, 1)][..],
-            &[PieceKind::Rook, PieceKind::Queen][..],
+            &board::ORTHOGONAL_RAYS,
+            PieceKind::Rook,
+            board.pieces(color, PieceKind::Rook) | queens,
         ),
     ] {
-        for &(dx, dy) in dirs {
-            for distance in 1..8 {
-                let (x, y) = (tx + dx * distance, ty + dy * distance);
-                if !(0..8).contains(&x) || !(0..8).contains(&y) {
-                    break;
-                }
-                if let Some(p) = at(x, y) {
-                    if p.color == color && kinds.contains(&p.kind) {
-                        return Some((p, (y * 8 + x) as u8));
-                    }
-                    break;
-                }
+        for ray in rays {
+            let Some(blocker) = ray.first_blocker(target, occupied) else {
+                continue;
+            };
+            let bit = 1u64 << blocker;
+            if sliders & bit != 0 {
+                let kind = if queens & bit != 0 {
+                    PieceKind::Queen
+                } else {
+                    slider
+                };
+                return Some((kind, blocker));
             }
         }
     }
-    // King (the most valuable, hence last-resort, attacker).
-    for y in ty - 1..=ty + 1 {
-        for x in tx - 1..=tx + 1 {
-            if let Some(
-                p @ Piece {
-                    color: c,
-                    kind: PieceKind::King,
-                },
-            ) = at(x, y)
-                && c == color
-            {
-                return Some((p, (y * 8 + x) as u8));
-            }
-        }
+    // King (the most valuable, hence last-resort, attacker; one per side, so
+    // there is never a tie to break).
+    let king =
+        board::KING_ATTACKS[target as usize] & board.pieces(color, PieceKind::King) & occupied;
+    if king != 0 {
+        return Some((PieceKind::King, king.trailing_zeros() as u8));
     }
     None
 }
