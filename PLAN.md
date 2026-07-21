@@ -138,6 +138,10 @@ Evaluation now walks piece bitboards directly and uses bitboards for pawn
 structure and king-safety inputs, removing its temporary pawn allocations and
 mailbox/rook rescans. The same benchmark fell further to 155 ms (roughly 597k
 NPS) without changing its deterministic output.
+Search now reuses one move buffer per ply for alpha-beta and quiescence, filters
+pseudo-legal moves in place, and records failed quiets without a heap vector.
+Three depth-6 samples completed in 147--152 ms (up to roughly 630k NPS), again
+with identical deterministic output.
 
 ## Next checkpoint
 
@@ -146,9 +150,9 @@ The first non-inferiority SPRT failed at its lower boundary after 35 games
 protocol-clean, but GoChess generally searched roughly three plies deeper at
 similar move times.
 
-Profile and remove the remaining largest search-throughput costs, starting with
-move-list allocation. Preserve exact
-evaluation, SEE, fixed-depth scores, best moves, and deterministic node counts.
+Profile the remaining search-throughput costs and improve the largest verified
+hotspot. Preserve exact evaluation, SEE, fixed-depth scores, best moves, and
+deterministic node counts.
 
 Re-run fixed-depth differential benchmarks after each coherent batch. Require
 an SPRT non-inferiority result before superiority experiments.

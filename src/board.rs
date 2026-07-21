@@ -446,14 +446,14 @@ impl Board {
     /// perft validates it exactly.
     pub fn generate_legal_moves(&self, out: &mut Vec<Move>) {
         out.clear();
+        self.generate_pseudo_moves(out, false);
         let mut board = self.clone();
-        for m in self.pseudo_moves(false) {
+        out.retain(|&m| {
             let undo = board.make_move(m);
-            if !board.in_check(self.side) {
-                out.push(m);
-            }
+            let legal = !board.in_check(self.side);
             board.unmake_move(m, undo);
-        }
+            legal
+        });
     }
     /// Convenience wrapper around [`generate_legal_moves`](Self::generate_legal_moves)
     /// that allocates a fresh vector.
@@ -464,22 +464,29 @@ impl Board {
     }
     /// The legal capturing moves only, used to drive the quiescence search.
     pub fn legal_captures(&self) -> Vec<Move> {
-        self.pseudo_moves(true)
-            .into_iter()
-            .filter(|m| {
-                let mut b = self.clone();
-                b.make_move(*m);
-                !b.in_check(self.side)
-            })
-            .collect()
+        let mut moves = Vec::with_capacity(16);
+        self.generate_legal_captures(&mut moves);
+        moves
+    }
+
+    /// Generates legal captures into a reusable caller-owned buffer.
+    pub(crate) fn generate_legal_captures(&self, out: &mut Vec<Move>) {
+        out.clear();
+        self.generate_pseudo_moves(out, true);
+        let mut board = self.clone();
+        out.retain(|&m| {
+            let undo = board.make_move(m);
+            let legal = !board.in_check(self.side);
+            board.unmake_move(m, undo);
+            legal
+        });
     }
 
     /// Generates pseudo-legal moves for the side to move — moves that respect
     /// each piece's movement but may leave the king in check. When
     /// `captures_only` is set (quiescence search), quiet moves are skipped, but
     /// promotions are always emitted because they change material.
-    fn pseudo_moves(&self, captures_only: bool) -> Vec<Move> {
-        let mut out = Vec::with_capacity(if captures_only { 16 } else { 48 });
+    fn generate_pseudo_moves(&self, out: &mut Vec<Move>, captures_only: bool) {
         for from in 0..64u8 {
             let Some(piece) = self.squares[from as usize] else {
                 continue;
@@ -590,7 +597,7 @@ impl Board {
                 // Sliders share `slide`, differing only in their ray directions.
                 PieceKind::Bishop => slide(
                     self,
-                    &mut out,
+                    out,
                     from,
                     piece,
                     &[(1, 1), (1, -1), (-1, 1), (-1, -1)],
@@ -598,7 +605,7 @@ impl Board {
                 ),
                 PieceKind::Rook => slide(
                     self,
-                    &mut out,
+                    out,
                     from,
                     piece,
                     &[(1, 0), (-1, 0), (0, 1), (0, -1)],
@@ -606,7 +613,7 @@ impl Board {
                 ),
                 PieceKind::Queen => slide(
                     self,
-                    &mut out,
+                    out,
                     from,
                     piece,
                     &[
@@ -685,7 +692,6 @@ impl Board {
                 }
             }
         }
-        out
     }
 
     /// Applies a move and returns the [`Undo`] token that reverses it.

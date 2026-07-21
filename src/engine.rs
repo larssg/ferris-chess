@@ -368,6 +368,9 @@ pub struct Engine {
     counter_moves: [[Move; 64]; 64],
     /// Moves on the current search line, used to find countermoves.
     move_stack: [Move; 64],
+    /// One reusable legal-move buffer per ply. Recursive calls use distinct
+    /// slots, so move generation does not allocate at each search node.
+    move_buffers: [Vec<Move>; 64],
     /// Stack of position hashes along the current line, for repetition detection.
     hashes: Vec<u64>,
     nodes: u64,
@@ -395,6 +398,7 @@ impl Engine {
             killers: [[Move::default(); 2]; 64],
             counter_moves: [[Move::default(); 64]; 64],
             move_stack: [Move::default(); 64],
+            move_buffers: std::array::from_fn(|_| Vec::with_capacity(48)),
             hashes: Vec::new(),
             nodes: 0,
             start: Instant::now(),
@@ -839,8 +843,11 @@ impl Engine {
         }
         // No legal moves: checkmate (scored by ply, so faster mates win) or
         // stalemate (a draw).
-        let mut moves = b.legal_moves();
+        let buffer = &mut self.move_buffers[ply as usize];
+        b.generate_legal_moves(buffer);
+        let mut moves = std::mem::take(buffer);
         if moves.is_empty() {
+            self.move_buffers[ply as usize] = moves;
             return if in_check { -MATE + ply as i32 } else { 0 };
         }
         // Order the moves, then float the transposition-table best move to the
@@ -857,8 +864,9 @@ impl Engine {
         let mut best_score = -INF;
         let can_futility_prune = !in_check && !node.pv && depth <= 2;
         let can_lmp = !in_check && !node.pv && depth <= 5;
-        let mut quiet_moves = Vec::with_capacity(moves.len());
-        for (i, m) in moves.into_iter().enumerate() {
+        let mut quiet_moves = [Move::default(); 256];
+        let mut quiet_count = 0;
+        for (i, m) in moves.iter().copied().enumerate() {
             let capture = b.piece_at(m.to).is_some() || m.en_passant;
             let quiet = !capture && m.promotion.is_none();
             let legal_moves = i + 1;
@@ -878,7 +886,8 @@ impl Engine {
                 continue;
             }
             if quiet {
-                quiet_moves.push(m);
+                quiet_moves[quiet_count] = m;
+                quiet_count += 1;
             }
             self.hashes.push(b.hash);
             self.move_stack[ply as usize] = m;
@@ -972,7 +981,7 @@ impl Engine {
             b.unmake_move(m, undo);
             self.hashes.pop();
             if self.stopped {
-                return 0;
+                break;
             }
             if score > best_score {
                 best_score = score;
@@ -992,7 +1001,7 @@ impl Engine {
                     }
                     let bonus = i32::from(depth).pow(2);
                     self.update_history(m, bonus);
-                    for failed in &quiet_moves[..quiet_moves.len() - 1] {
+                    for failed in &quiet_moves[..quiet_count - 1] {
                         self.update_history(*failed, -bonus);
                     }
                     if ply > 0 {
@@ -1004,6 +1013,10 @@ impl Engine {
                 }
                 break;
             }
+        }
+        self.move_buffers[ply as usize] = moves;
+        if self.stopped {
+            return 0;
         }
         // Classify the result relative to the original window so the stored
         // bound is interpreted correctly on a later probe.
@@ -1060,15 +1073,18 @@ impl Engine {
         }
         // In check every legal move must be considered (it may be the only
         // escape); otherwise only captures are examined.
-        let moves = if in_check {
-            b.legal_moves()
+        let buffer = &mut self.move_buffers[ply as usize];
+        if in_check {
+            b.generate_legal_moves(buffer);
         } else {
-            b.legal_captures()
-        };
+            b.generate_legal_captures(buffer);
+        }
+        let moves = std::mem::take(buffer);
         if moves.is_empty() && in_check {
+            self.move_buffers[ply as usize] = moves;
             return -MATE + ply as i32;
         }
-        for m in moves {
+        for m in moves.iter().copied() {
             if !in_check {
                 // Skip captures that lose material by SEE...
                 if m.promotion.is_none() && static_exchange_eval(b, m) < 0 {
@@ -1085,12 +1101,14 @@ impl Engine {
             let score = -self.qsearch(b, -beta, -alpha, ply + 1);
             b.unmake_move(m, undo);
             if score >= beta {
+                self.move_buffers[ply as usize] = moves;
                 return score;
             }
             if score > alpha {
                 alpha = score
             }
         }
+        self.move_buffers[ply as usize] = moves;
         alpha
     }
     /// Sorts moves best-first to maximize alpha-beta cutoffs. The ranking, from
