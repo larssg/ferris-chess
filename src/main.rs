@@ -2,7 +2,7 @@
 //! `chess` library. The engine runs on a worker thread so the main loop can keep
 //! reading commands (notably `stop` and `ponderhit`) while a search is running.
 
-use chess::{Board, Color, Engine, SearchHandle, SearchLimits};
+use chess::{Board, Color, Engine, SearchHandle, SearchLimits, book::book_move};
 use std::{
     io::{self, BufRead},
     thread::{self, JoinHandle},
@@ -51,6 +51,12 @@ fn time_budget(
     (soft, hard)
 }
 
+fn has_starting_pieces(board: &Board) -> bool {
+    let start = Board::startpos();
+    board.side == Color::White
+        && (0..64).all(|square| board.piece_at(square) == start.piece_at(square))
+}
+
 fn main() {
     // First, give the benchmark harness a chance to handle `bench ...` args.
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -64,6 +70,8 @@ fn main() {
     }
     // `engine` is `Some` when idle and `None` while the worker holds it.
     let mut board = Board::startpos();
+    let mut move_history = Vec::<String>::new();
+    let mut own_book = true;
     let mut engine = Some(Engine::new());
     let mut running: Option<RunningSearch> = None;
     let stdin = io::stdin();
@@ -86,27 +94,35 @@ fn main() {
         }
         match parts[0] {
             "uci" => println!(
-                "id name FerrisChess 0.1\nid author LarsSG and OpenAI\noption name Hash type spin default 64 min 1 max 4096\nuciok"
+                "id name FerrisChess 0.1\nid author LarsSG and OpenAI\noption name Hash type spin default 64 min 1 max 4096\noption name OwnBook type check default true\nuciok"
             ),
             "isready" => println!("readyok"),
             "ucinewgame" => {
                 stop_search(&mut running, &mut engine);
                 board = Board::startpos();
+                move_history.clear();
                 engine.as_mut().unwrap().clear()
             }
-            // The only supported option is `Hash`; parse its megabyte value and
-            // clamp it to the advertised range.
+            // Parse the advertised Hash and OwnBook options; unknown options
+            // are silently ignored as required by UCI.
             "setoption" => {
                 stop_search(&mut running, &mut engine);
                 if let (Some(name), Some(value)) = (
                     parts.iter().position(|p| *p == "name"),
                     parts.iter().position(|p| *p == "value"),
-                ) && parts
-                    .get(name + 1)
-                    .is_some_and(|p| p.eq_ignore_ascii_case("hash"))
-                    && let Some(mb) = parts.get(value + 1).and_then(|v| v.parse::<usize>().ok())
+                ) && name < value
                 {
-                    engine.as_mut().unwrap().set_hash_mb(mb.clamp(1, 4096));
+                    let option = parts[name + 1..value].join(" ").to_ascii_lowercase();
+                    let setting = parts[value + 1..].join(" ");
+                    match option.as_str() {
+                        "hash" => {
+                            if let Ok(mb) = setting.parse::<usize>() {
+                                engine.as_mut().unwrap().set_hash_mb(mb.clamp(1, 4096));
+                            }
+                        }
+                        "ownbook" => own_book = setting.eq_ignore_ascii_case("true"),
+                        _ => {}
+                    }
                 }
             }
             // `position [startpos | fen <FEN>] [moves <m>...]`: set the board,
@@ -114,6 +130,7 @@ fn main() {
             "position" => {
                 stop_search(&mut running, &mut engine);
                 engine.as_mut().unwrap().reset_game_history();
+                move_history.clear();
                 let mut i = 1;
                 if parts.get(i) == Some(&"startpos") {
                     board = Board::startpos();
@@ -134,6 +151,7 @@ fn main() {
                         if let Some(m) = board.parse_move(s) {
                             engine.as_mut().unwrap().append_game_hash(board.hash);
                             board.make_move(m);
+                            move_history.push(m.to_string());
                         }
                     }
                 }
@@ -254,6 +272,17 @@ fn main() {
                 limits.white_increment = Duration::from_millis(winc);
                 limits.black_increment = Duration::from_millis(binc);
                 limits.moves_to_go = moves_to_go;
+                // Book lookup precedes search, but never overrides an explicit
+                // root restriction. The reply is parsed on the current board so
+                // malformed repertoire data can never produce an illegal move.
+                if own_book
+                    && limits.root_moves.is_empty()
+                    && (!move_history.is_empty() || has_starting_pieces(&board))
+                    && let Some(chess_move) = book_move(&board, &move_history)
+                {
+                    println!("bestmove {chess_move}");
+                    continue;
+                }
                 // Move the engine onto a worker thread; it prints `info` lines as
                 // it searches and a final `bestmove`, then returns the engine.
                 let control = SearchHandle::new(limits.ponder);

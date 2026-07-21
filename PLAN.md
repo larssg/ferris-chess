@@ -79,8 +79,10 @@ Implemented public interfaces and behavior include:
   countermove ordering tied to the preceding move.
 - Same-side repetition scanning across real-game and search history, plus
   adaptive soft/hard time budgets that respond to search instability.
+- The complete 108-position GoChess opening repertoire with legal-move
+  validation, move-history lookup, `OwnBook`, and `searchmoves` bypass.
 
-At the current worktree checkpoint, all 25 Rust tests, warning-free Clippy,
+At the current worktree checkpoint, all 26 Rust tests, warning-free Clippy,
 release builds, GoChess tests, and UCI smoke tests passed.
 
 ## Recorded baseline
@@ -122,13 +124,15 @@ reduced the total again to 17,150 nodes. Bounded history updates, failed-quiet
 maluses, and countermoves reduced it to 15,067 nodes while preserving all
 three scores and best moves. Correct repetition semantics and adaptive time
 management preserve that deterministic fixed-depth result.
+Opening-book parity does not affect the explicit benchmark search path.
 
 ## Next checkpoint
 
 Port the next measured GoChess search-behavior batch:
 
-1. Opening book behavior and the `OwnBook` UCI option.
-2. `Threads` option semantics and remaining differential parity fixtures.
+1. `Threads` option semantics and remaining differential parity fixtures.
+2. Run the first Cute Chess non-inferiority SPRT and use its result to select
+   any remaining parity work.
 
 Re-run fixed-depth differential benchmarks after each coherent batch. Require
 an SPRT non-inferiority result before superiority experiments.

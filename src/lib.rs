@@ -16,6 +16,7 @@
 
 pub mod benchmark;
 pub mod board;
+pub mod book;
 pub mod engine;
 pub mod eval;
 
