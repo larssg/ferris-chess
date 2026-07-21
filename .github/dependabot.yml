@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Rust dependencies for the whole workspace (root engine + gui/ member),
+  # all resolved through the single root Cargo.lock.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: daily
+
+  # Action versions used by the workflows in .github/workflows/.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
