@@ -153,6 +153,9 @@ roughly 761k NPS), again without changing deterministic output.
 Bitboard king lookup, precomputed knight/king attack masks, and bitboard-backed
 slider blocker tests then reduced the same depth-9 benchmark to 434--444 ms
 (up to roughly 1.19M NPS), preserving all deterministic results and perft.
+Per-file pawn bitboards and rank masks replaced repeated pawn-set walks in the
+profile's next-largest leaf hotspot. Depth 9 fell further to 415--427 ms (up to
+roughly 1.24M NPS) with exact evaluation and search parity preserved.
 
 ## Next checkpoint
 

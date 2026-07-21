@@ -132,27 +132,44 @@ pub fn evaluate(board: &Board) -> i32 {
 /// backward, doubled, and isolated pawns. `pawns` is the side being scored,
 /// `opponents` the enemy pawns used to detect passers and backward pawns.
 fn pawn_structure(pawns: u64, opponents: u64, color: Color) -> i32 {
-    // Pawns per file, for the doubled/isolated checks at the end.
+    // Per-file bitboards make the structural questions below constant-time for
+    // each pawn instead of repeatedly walking both pawn sets.
     let mut files = [0i32; 8];
-    for sq in bit_squares(pawns) {
-        files[(sq % 8) as usize] += 1;
+    let mut pawn_files = [0u64; 8];
+    let mut opponent_files = [0u64; 8];
+    for file in 0..8 {
+        let mask = 0x0101_0101_0101_0101u64 << file;
+        pawn_files[file] = pawns & mask;
+        opponent_files[file] = opponents & mask;
+        files[file] = pawn_files[file].count_ones() as i32;
     }
     let mut score = 0;
     let mut passed = 0u64;
     for sq in bit_squares(pawns) {
         let file = i32::from(sq % 8);
         let rank = i32::from(sq / 8);
-        // "Ahead" means closer to the enemy back rank, which depends on color.
-        let is_ahead = |other: u8| {
-            if color == Color::White {
-                i32::from(other / 8) > rank
-            } else {
-                i32::from(other / 8) < rank
-            }
-        };
         // Passed: no enemy pawn on this or an adjacent file lies ahead to stop it.
-        let is_passed = !bit_squares(opponents)
-            .any(|other| (i32::from(other % 8) - file).abs() <= 1 && is_ahead(other));
+        let first_file = (file - 1).max(0) as usize;
+        let last_file = (file + 1).min(7) as usize;
+        let opposing_files = opponent_files[first_file..=last_file]
+            .iter()
+            .copied()
+            .fold(0, |combined, bits| combined | bits);
+        let adjacent_opposing = if file > 0 {
+            opponent_files[file as usize - 1]
+        } else {
+            0
+        } | if file < 7 {
+            opponent_files[file as usize + 1]
+        } else {
+            0
+        };
+        let ahead = if color == Color::White {
+            ranks_above(rank as u8)
+        } else {
+            ranks_below(rank as u8)
+        };
+        let is_passed = opposing_files & ahead == 0;
         if is_passed {
             // Reward grows quadratically as the pawn nears promotion.
             let relative_rank = if color == Color::White {
@@ -164,30 +181,31 @@ fn pawn_structure(pawns: u64, opponents: u64, color: Color) -> i32 {
             passed |= 1u64 << sq;
         }
         // Supported: a friendly pawn on an adjacent file, not further advanced.
-        let supported = bit_squares(pawns).any(|other| {
-            (i32::from(other % 8) - file).abs() == 1
-                && if color == Color::White {
-                    other / 8 <= sq / 8
-                } else {
-                    other / 8 >= sq / 8
-                }
-        });
+        let adjacent_friendly = if file > 0 {
+            pawn_files[file as usize - 1]
+        } else {
+            0
+        } | if file < 7 {
+            pawn_files[file as usize + 1]
+        } else {
+            0
+        };
+        let support_ranks = if color == Color::White {
+            !ranks_above(rank as u8)
+        } else {
+            !ranks_below(rank as u8)
+        };
+        let supported = adjacent_friendly & support_ranks != 0;
         // Backward: an unsupported, non-passed pawn whose advance square is
         // guarded by an enemy pawn, so it cannot safely move forward.
         if !supported && !is_passed {
-            let stop = if color == Color::White {
-                rank + 1
+            let attacking_rank = if color == Color::White {
+                rank + 2
             } else {
-                rank - 1
+                rank - 2
             };
-            let backward = bit_squares(opponents).any(|other| {
-                (i32::from(other % 8) - file).abs() == 1
-                    && if color == Color::White {
-                        i32::from(other / 8) == stop + 1
-                    } else {
-                        i32::from(other / 8) == stop - 1
-                    }
-            });
+            let backward = (0..8).contains(&attacking_rank)
+                && adjacent_opposing & (0xffu64 << (attacking_rank * 8)) != 0;
             if backward {
                 score -= BACKWARD_PAWN;
             }
@@ -226,6 +244,22 @@ fn pawn_structure(pawns: u64, opponents: u64, color: Color) -> i32 {
         }
     }
     score
+}
+
+const fn ranks_above(rank: u8) -> u64 {
+    if rank == 7 {
+        0
+    } else {
+        u64::MAX << ((rank + 1) * 8)
+    }
+}
+
+const fn ranks_below(rank: u8) -> u64 {
+    if rank == 0 {
+        0
+    } else {
+        (1u64 << (rank * 8)) - 1
+    }
 }
 
 /// Iterates the set squares of a bitboard from a1 toward h8.
