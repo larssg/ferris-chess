@@ -1,5 +1,7 @@
 # FerrisChess
 
+[![Deploy web GUI](https://github.com/larssg/ferris-chess/actions/workflows/deploy-gui.yml/badge.svg)](https://github.com/larssg/ferris-chess/actions/workflows/deploy-gui.yml)
+
 A dependency-free UCI chess engine written in Rust, modeled after the sibling
 GoChess project. The engine is currently a compact, playable baseline with a
 complete legal chess core and classical alpha-beta search.
