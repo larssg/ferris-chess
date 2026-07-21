@@ -1490,6 +1490,45 @@ mod tests {
     }
 
     #[test]
+    fn fixed_depth_results_match_reference_fixtures() {
+        for (fen, expected_score, expected_move) in [
+            (
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                0,
+                "g1f3",
+            ),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                45,
+                "e2a6",
+            ),
+            (
+                "r2q1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PPQ2PPP/R1B2RK1 w - - 2 10",
+                34,
+                "f3e5",
+            ),
+        ] {
+            let board = Board::from_fen(fen).unwrap();
+            let mut engine = Engine::new();
+            let result = engine.search(
+                &board,
+                SearchLimits {
+                    depth: 4,
+                    infinite: true,
+                    ..SearchLimits::default()
+                },
+                |_| {},
+            );
+            assert_eq!(result.score, expected_score, "{fen}");
+            assert_eq!(
+                result.best_move.map(|chess_move| chess_move.to_string()),
+                Some(expected_move.into()),
+                "{fen}"
+            );
+        }
+    }
+
+    #[test]
     fn search_can_be_cancelled_from_another_thread() {
         let control = SearchHandle::new(false);
         let worker_control = control.clone();

@@ -497,6 +497,14 @@ mod tests {
             ),
             ("7k/8/8/8/8/8/4Q3/K7 w - - 0 1", 1311),
             ("7k/8/8/8/8/8/4Q3/K7 b - - 0 1", -1311),
+            ("4k3/8/8/r4pPK/8/8/8/8 w - f6 0 1", -597),
+            ("4k3/1P6/8/8/8/8/6p1/4K3 w - - 0 1", 44),
+            ("4k3/8/3p4/3P4/2P5/8/8/4K3 w - - 0 1", 121),
+            ("6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1", 687),
+            (
+                "r2q1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PPQ2PPP/R1B2RK1 w - - 2 10",
+                36,
+            ),
         ] {
             assert_eq!(evaluate(&Board::from_fen(fen).unwrap()), expected, "{fen}");
         }
@@ -513,6 +521,11 @@ mod tests {
         assert_eq!(
             static_exchange_eval(&board, board.parse_move("c4d5").unwrap()),
             1239
+        );
+        let board = Board::from_fen("4k3/8/4p3/3p4/4P3/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(
+            static_exchange_eval(&board, board.parse_move("e4d5").unwrap()),
+            0
         );
     }
 }

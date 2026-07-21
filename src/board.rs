@@ -1094,6 +1094,18 @@ const fn piece_index(piece: Piece) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legal_move_names(fen: &str) -> Vec<String> {
+        let mut moves = Board::from_fen(fen)
+            .unwrap()
+            .legal_moves()
+            .into_iter()
+            .map(|chess_move| chess_move.to_string())
+            .collect::<Vec<_>>();
+        moves.sort_unstable();
+        moves
+    }
+
     #[test]
     fn fen_roundtrip() {
         let b = Board::startpos();
@@ -1109,6 +1121,30 @@ mod tests {
         assert_eq!(b.perft(2), 400);
         assert_eq!(b.perft(3), 8902);
         assert_eq!(b.perft(4), 197281)
+    }
+
+    #[test]
+    fn legal_moves_match_reference_rule_edge_fixtures() {
+        assert_eq!(
+            legal_move_names("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1"),
+            [
+                "a1a2", "a1a3", "a1a4", "a1a5", "a1a6", "a1a7", "a1a8", "a1b1", "a1c1", "a1d1",
+                "e1c1", "e1d1", "e1d2", "e1e2", "e1f1", "e1f2", "e1g1", "h1f1", "h1g1", "h1h2",
+                "h1h3", "h1h4", "h1h5", "h1h6", "h1h7", "h1h8",
+            ]
+        );
+        // g5xf6 e.p. would remove both blockers from the fifth rank and expose
+        // the white king to the rook on a5, so the reference rejects it.
+        assert_eq!(
+            legal_move_names("4k3/8/8/r4pPK/8/8/8/8 w - f6 0 1"),
+            ["g5g6", "h5g6", "h5h4", "h5h6"]
+        );
+        assert_eq!(
+            legal_move_names("4k3/1P6/8/8/8/8/6p1/4K3 w - - 0 1"),
+            [
+                "b7b8b", "b7b8n", "b7b8q", "b7b8r", "e1d1", "e1d2", "e1e2", "e1f2",
+            ]
+        );
     }
     #[test]
     fn kiwipete() {
