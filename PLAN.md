@@ -134,6 +134,10 @@ full-position hash recomputation after every move with incremental updates.
 The depth-6 search benchmark remains deterministic at 92,572 nodes with
 identical scores, best moves, and PVs; on the development machine its sampled
 runtime fell from 316 ms to 175 ms (roughly 293k to 529k NPS).
+Evaluation now walks piece bitboards directly and uses bitboards for pawn
+structure and king-safety inputs, removing its temporary pawn allocations and
+mailbox/rook rescans. The same benchmark fell further to 155 ms (roughly 597k
+NPS) without changing its deterministic output.
 
 ## Next checkpoint
 
@@ -143,7 +147,7 @@ protocol-clean, but GoChess generally searched roughly three plies deeper at
 similar move times.
 
 Profile and remove the remaining largest search-throughput costs, starting with
-evaluation rescans and move-list allocation. Preserve exact
+move-list allocation. Preserve exact
 evaluation, SEE, fixed-depth scores, best moves, and deterministic node counts.
 
 Re-run fixed-depth differential benchmarks after each coherent batch. Require

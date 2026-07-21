@@ -74,36 +74,37 @@ fn pst(piece: Piece, square: u8, endgame: bool) -> i32 {
 /// The full static evaluation, in centipawns from the side-to-move's point of
 /// view (positive = the side to move is better).
 ///
-/// A single pass over the board accumulates material plus piece-square bonuses
-/// and, along the way, collects each side's pawn squares and bishop count for
-/// the structural terms that follow. The running `score` is White-positive
-/// throughout and only flipped to side-relative at the return.
+/// Piece bitboards drive both the base score and the structural terms, avoiding
+/// mailbox rescans and temporary pawn lists. The running `score` is
+/// White-positive throughout and only flipped to side-relative at the return.
 pub fn evaluate(board: &Board) -> i32 {
     let endgame = is_endgame(board);
     let mut score = 0;
-    // Pawn squares per side, gathered here so pawn-structure and king-safety
-    // terms don't each have to re-scan the board.
-    let mut pawns = [Vec::with_capacity(8), Vec::with_capacity(8)];
-    let mut bishops = [0; 2];
-    for square in 0..64 {
-        let Some(piece) = board.piece_at(square) else {
-            continue;
-        };
-        let side = usize::from(piece.color == Color::Black);
-        let signed = piece_value(piece.kind) + pst(piece, square, endgame);
-        score += if side == 0 { signed } else { -signed };
-        if piece.kind == PieceKind::Pawn {
-            pawns[side].push(square);
-        }
-        if piece.kind == PieceKind::Bishop {
-            bishops[side] += 1;
+    for color in [Color::White, Color::Black] {
+        for kind in [
+            PieceKind::Pawn,
+            PieceKind::Knight,
+            PieceKind::Bishop,
+            PieceKind::Rook,
+            PieceKind::Queen,
+            PieceKind::King,
+        ] {
+            let piece = Piece { color, kind };
+            for square in bit_squares(board.pieces(color, kind)) {
+                let value = piece_value(kind) + pst(piece, square, endgame);
+                score += if color == Color::White { value } else { -value };
+            }
         }
     }
+    let pawns = [
+        board.pieces(Color::White, PieceKind::Pawn),
+        board.pieces(Color::Black, PieceKind::Pawn),
+    ];
     // The bishop pair is worth a small bonus for its coordinated coverage.
-    if bishops[0] >= 2 {
+    if board.pieces(Color::White, PieceKind::Bishop).count_ones() >= 2 {
         score += BISHOP_PAIR;
     }
-    if bishops[1] >= 2 {
+    if board.pieces(Color::Black, PieceKind::Bishop).count_ones() >= 2 {
         score -= BISHOP_PAIR;
     }
     // King safety matters in the middlegame; in the endgame the king is an
@@ -113,8 +114,8 @@ pub fn evaluate(board: &Board) -> i32 {
         score -= king_safety(board, Color::Black, &pawns[1]);
     }
     score += rooks(board, Color::White) - rooks(board, Color::Black);
-    score += pawn_structure(&pawns[0], &pawns[1], Color::White);
-    score -= pawn_structure(&pawns[1], &pawns[0], Color::Black);
+    score += pawn_structure(pawns[0], pawns[1], Color::White);
+    score -= pawn_structure(pawns[1], pawns[0], Color::Black);
     if endgame {
         score += mop_up(board, score);
     }
@@ -130,15 +131,15 @@ pub fn evaluate(board: &Board) -> i32 {
 /// bonuses growing with advancement, connected-passer bonuses, and penalties for
 /// backward, doubled, and isolated pawns. `pawns` is the side being scored,
 /// `opponents` the enemy pawns used to detect passers and backward pawns.
-fn pawn_structure(pawns: &[u8], opponents: &[u8], color: Color) -> i32 {
+fn pawn_structure(pawns: u64, opponents: u64, color: Color) -> i32 {
     // Pawns per file, for the doubled/isolated checks at the end.
     let mut files = [0i32; 8];
-    for &sq in pawns {
+    for sq in bit_squares(pawns) {
         files[(sq % 8) as usize] += 1;
     }
     let mut score = 0;
-    let mut passed = Vec::with_capacity(8);
-    for &sq in pawns {
+    let mut passed = 0u64;
+    for sq in bit_squares(pawns) {
         let file = i32::from(sq % 8);
         let rank = i32::from(sq / 8);
         // "Ahead" means closer to the enemy back rank, which depends on color.
@@ -150,9 +151,8 @@ fn pawn_structure(pawns: &[u8], opponents: &[u8], color: Color) -> i32 {
             }
         };
         // Passed: no enemy pawn on this or an adjacent file lies ahead to stop it.
-        let is_passed = !opponents
-            .iter()
-            .any(|&other| (i32::from(other % 8) - file).abs() <= 1 && is_ahead(other));
+        let is_passed = !bit_squares(opponents)
+            .any(|other| (i32::from(other % 8) - file).abs() <= 1 && is_ahead(other));
         if is_passed {
             // Reward grows quadratically as the pawn nears promotion.
             let relative_rank = if color == Color::White {
@@ -161,10 +161,10 @@ fn pawn_structure(pawns: &[u8], opponents: &[u8], color: Color) -> i32 {
                 7 - rank
             };
             score += relative_rank * relative_rank * PASSED_RANK_SQUARED;
-            passed.push(sq);
+            passed |= 1u64 << sq;
         }
         // Supported: a friendly pawn on an adjacent file, not further advanced.
-        let supported = pawns.iter().any(|&other| {
+        let supported = bit_squares(pawns).any(|other| {
             (i32::from(other % 8) - file).abs() == 1
                 && if color == Color::White {
                     other / 8 <= sq / 8
@@ -180,7 +180,7 @@ fn pawn_structure(pawns: &[u8], opponents: &[u8], color: Color) -> i32 {
             } else {
                 rank - 1
             };
-            let backward = opponents.iter().any(|&other| {
+            let backward = bit_squares(opponents).any(|other| {
                 (i32::from(other % 8) - file).abs() == 1
                     && if color == Color::White {
                         i32::from(other / 8) == stop + 1
@@ -195,8 +195,8 @@ fn pawn_structure(pawns: &[u8], opponents: &[u8], color: Color) -> i32 {
     }
     // Connected passers: two passed pawns on adjacent files defend each other's
     // advance. The bonus scales with how far the rear of the pair has advanced.
-    for (i, &a) in passed.iter().enumerate() {
-        for &b in &passed[i + 1..] {
+    for a in bit_squares(passed) {
+        for b in bit_squares(passed).filter(|&b| b > a) {
             if (i32::from(a % 8) - i32::from(b % 8)).abs() == 1 {
                 let ar = if color == Color::White {
                     a / 8
@@ -228,10 +228,22 @@ fn pawn_structure(pawns: &[u8], opponents: &[u8], color: Color) -> i32 {
     score
 }
 
+/// Iterates the set squares of a bitboard from a1 toward h8.
+fn bit_squares(mut bits: u64) -> impl Iterator<Item = u8> {
+    std::iter::from_fn(move || {
+        if bits == 0 {
+            return None;
+        }
+        let square = bits.trailing_zeros() as u8;
+        bits &= bits - 1;
+        Some(square)
+    })
+}
+
 /// Scores the safety of `color`'s king (White-positive): a bonus per adjacent
 /// file that has a sheltering pawn, a penalty per open file beside the king, and
 /// a bonus for a king tucked into a castled corner.
-fn king_safety(board: &Board, color: Color, pawns: &[u8]) -> i32 {
+fn king_safety(board: &Board, color: Color, pawns: &u64) -> i32 {
     let Some(king) = board.king_square(color) else {
         return 0;
     };
@@ -243,7 +255,7 @@ fn king_safety(board: &Board, color: Color, pawns: &[u8]) -> i32 {
         if !(0..8).contains(&f) {
             continue;
         }
-        let shielded = pawns.iter().any(|&sq| {
+        let shielded = bit_squares(*pawns).any(|sq| {
             sq % 8 == f as u8
                 && if color == Color::White {
                     sq / 8 >= rank
@@ -270,15 +282,7 @@ fn king_safety(board: &Board, color: Color, pawns: &[u8]) -> i32 {
 /// one whole file.
 fn rooks(board: &Board, color: Color) -> i32 {
     let mut score = 0;
-    for sq in 0..64 {
-        if board.piece_at(sq)
-            != Some(Piece {
-                color,
-                kind: PieceKind::Rook,
-            })
-        {
-            continue;
-        }
+    for sq in bit_squares(board.pieces(color, PieceKind::Rook)) {
         let own = board.pieces(color, PieceKind::Pawn) & (0x0101_0101_0101_0101 << (sq % 8));
         let enemy =
             board.pieces(color.other(), PieceKind::Pawn) & (0x0101_0101_0101_0101 << (sq % 8));
