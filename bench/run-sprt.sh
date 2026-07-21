@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+: "${GOCHESS_BIN:?set GOCHESS_BIN to the pinned GoChess binary}"
+rust_engine=${RUST_ENGINE:-./target/release/chess}
+openings=${OPENINGS:-bench/data/8moves_v3.pgn}
+games=${GAMES:-10000}
+
+test -x "$rust_engine"
+test -x "$GOCHESS_BIN"
+test -f "$openings"
+
+cutechess-cli \
+  -engine "cmd=$rust_engine" name=FerrisChess proto=uci \
+  -engine "cmd=$GOCHESS_BIN" name=GoChess-c3da983 proto=uci \
+  -each tc=10+0.1 option.Hash=64 \
+  -openings "file=$openings" format=pgn order=random plies=16 \
+  -srand 1 -repeat -games "$games" \
+  -sprt elo0=0 elo1=20 alpha=0.05 beta=0.05 \
+  -resign movecount=3 score=600 \
+  -draw movenumber=40 movecount=8 score=10 \
+  -pgnout bench/results/sprt.pgn

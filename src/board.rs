@@ -262,6 +262,81 @@ impl Board {
         })
     }
 
+    pub fn parse_san(&self, text: &str) -> Option<Move> {
+        let target = text
+            .trim()
+            .trim_end_matches(['+', '#', '!', '?'])
+            .replace('0', "O");
+        self.legal_moves()
+            .into_iter()
+            .find(|chess_move| self.san_without_check(*chess_move) == target)
+    }
+
+    fn san_without_check(&self, chess_move: Move) -> String {
+        if chess_move.castle {
+            return if chess_move.to > chess_move.from {
+                "O-O".into()
+            } else {
+                "O-O-O".into()
+            };
+        }
+        let piece = self.piece_at(chess_move.from).unwrap();
+        let capture = chess_move.en_passant || self.piece_at(chess_move.to).is_some();
+        let mut san = String::new();
+        if piece.kind != PieceKind::Pawn {
+            san.push(match piece.kind {
+                PieceKind::Knight => 'N',
+                PieceKind::Bishop => 'B',
+                PieceKind::Rook => 'R',
+                PieceKind::Queen => 'Q',
+                PieceKind::King => 'K',
+                PieceKind::Pawn => unreachable!(),
+            });
+            let alternatives: Vec<_> = self
+                .legal_moves()
+                .into_iter()
+                .filter(|candidate| {
+                    candidate.to == chess_move.to
+                        && candidate.from != chess_move.from
+                        && self.piece_at(candidate.from).map(|other| other.kind) == Some(piece.kind)
+                })
+                .collect();
+            if !alternatives.is_empty() {
+                let same_file = alternatives
+                    .iter()
+                    .any(|candidate| candidate.from % 8 == chess_move.from % 8);
+                let same_rank = alternatives
+                    .iter()
+                    .any(|candidate| candidate.from / 8 == chess_move.from / 8);
+                if !same_file {
+                    san.push((b'a' + chess_move.from % 8) as char);
+                } else if !same_rank {
+                    san.push((b'1' + chess_move.from / 8) as char);
+                } else {
+                    san.push((b'a' + chess_move.from % 8) as char);
+                    san.push((b'1' + chess_move.from / 8) as char);
+                }
+            }
+        } else if capture {
+            san.push((b'a' + chess_move.from % 8) as char);
+        }
+        if capture {
+            san.push('x');
+        }
+        san.push_str(&square_name(chess_move.to));
+        if let Some(promotion) = chess_move.promotion {
+            san.push('=');
+            san.push(match promotion {
+                PieceKind::Knight => 'N',
+                PieceKind::Bishop => 'B',
+                PieceKind::Rook => 'R',
+                PieceKind::Queen => 'Q',
+                PieceKind::Pawn | PieceKind::King => unreachable!(),
+            });
+        }
+        san
+    }
+
     pub fn piece_at(&self, square: u8) -> Option<Piece> {
         self.squares.get(square as usize).copied().flatten()
     }
@@ -888,5 +963,16 @@ mod tests {
             0x0000_0000_0000_ff00
         );
         assert_eq!(board.occupied(), 0xffff_0000_0000_ffff);
+    }
+
+    #[test]
+    fn parses_standard_algebraic_moves() {
+        let board = Board::startpos();
+        assert_eq!(board.parse_san("Nf3"), board.parse_move("g1f3"));
+        assert_eq!(board.parse_san("e4"), board.parse_move("e2e4"));
+
+        let tactical =
+            Board::from_fen("2rr3k/pp3pp1/1nnqbN1p/3pN3/2pP4/2P3Q1/PPB4P/R4RK1 w - - 0 1").unwrap();
+        assert_eq!(tactical.parse_san("Qg6"), tactical.parse_move("g3g6"));
     }
 }

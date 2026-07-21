@@ -1,3 +1,4 @@
+pub mod benchmark;
 pub mod board;
 pub mod engine;
 

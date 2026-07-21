@@ -20,6 +20,15 @@ fn stop_search(running: &mut Option<RunningSearch>, engine: &mut Option<Engine>)
 }
 
 fn main() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    match chess::benchmark::run(&args) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("benchmark error: {error}");
+            std::process::exit(2);
+        }
+    }
     let mut board = Board::startpos();
     let mut engine = Some(Engine::new());
     let mut running: Option<RunningSearch> = None;
