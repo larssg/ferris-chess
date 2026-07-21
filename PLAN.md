@@ -156,6 +156,9 @@ slider blocker tests then reduced the same depth-9 benchmark to 434--444 ms
 Per-file pawn bitboards and rank masks replaced repeated pawn-set walks in the
 profile's next-largest leaf hotspot. Depth 9 fell further to 415--427 ms (up to
 roughly 1.24M NPS) with exact evaluation and search parity preserved.
+Compile-time piece, castling, en-passant, and side hash tables then removed
+SplitMix arithmetic from make/unmake. Depth 9 fell to 400--407 ms (up to
+roughly 1.29M NPS) while retaining the engine's exact hash identities.
 
 ## Next checkpoint
 

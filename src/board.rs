@@ -787,15 +787,15 @@ impl Board {
         self.side = self.side.other();
         // Piece keys were maintained while moving the pieces above. Finish the
         // incremental hash update with the non-piece state that changed.
-        self.hash ^= mix64(500 + u64::from(undo.castling));
-        self.hash ^= mix64(500 + u64::from(self.castling));
+        self.hash ^= CASTLING_HASHES[undo.castling as usize];
+        self.hash ^= CASTLING_HASHES[self.castling as usize];
         if let Some(ep) = undo.en_passant {
-            self.hash ^= mix64(600 + u64::from(ep % 8));
+            self.hash ^= EN_PASSANT_HASHES[(ep % 8) as usize];
         }
         if let Some(ep) = self.en_passant {
-            self.hash ^= mix64(600 + u64::from(ep % 8));
+            self.hash ^= EN_PASSANT_HASHES[(ep % 8) as usize];
         }
-        self.hash ^= mix64(700);
+        self.hash ^= SIDE_HASH;
         undo
     }
 
@@ -841,9 +841,9 @@ impl Board {
         self.side = self.side.other();
         self.en_passant = None;
         if let Some(ep) = undo.en_passant {
-            self.hash ^= mix64(600 + u64::from(ep % 8));
+            self.hash ^= EN_PASSANT_HASHES[(ep % 8) as usize];
         }
-        self.hash ^= mix64(700);
+        self.hash ^= SIDE_HASH;
         undo
     }
 
@@ -952,18 +952,15 @@ impl Board {
         let mut h = 0x9e3779b97f4a7c15u64;
         for (sq, p) in self.squares.iter().enumerate() {
             if let Some(p) = p {
-                h ^= mix64(
-                    sq as u64
-                        + 64 * (p.kind as u64 + 8 * if p.color == Color::White { 1 } else { 2 }),
-                )
+                h ^= piece_hash(*p, sq as u8)
             }
         }
-        h ^= mix64(500 + self.castling as u64);
+        h ^= CASTLING_HASHES[self.castling as usize];
         if let Some(ep) = self.en_passant {
-            h ^= mix64(600 + (ep % 8) as u64)
+            h ^= EN_PASSANT_HASHES[(ep % 8) as usize]
         }
         if self.side == Color::Black {
-            h ^= mix64(700)
+            h ^= SIDE_HASH
         }
         h
     }
@@ -1115,7 +1112,7 @@ pub fn square_name(s: u8) -> String {
 }
 /// SplitMix64 finalizer: scrambles an integer into a well-distributed 64-bit
 /// value. Used to derive per-feature hash keys in [`Board::compute_hash`].
-fn mix64(mut z: u64) -> u64 {
+const fn mix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9e3779b97f4a7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
@@ -1124,10 +1121,38 @@ fn mix64(mut z: u64) -> u64 {
 
 /// The hash feature for one piece on one square.
 fn piece_hash(piece: Piece, square: u8) -> u64 {
-    mix64(
-        u64::from(square)
-            + 64 * (piece.kind as u64 + 8 * if piece.color == Color::White { 1 } else { 2 }),
-    )
+    PIECE_HASHES[piece_index(piece) * 64 + square as usize]
+}
+
+const PIECE_HASHES: [u64; 12 * 64] = build_piece_hashes();
+const CASTLING_HASHES: [u64; 16] = build_hashes::<16>(500);
+const EN_PASSANT_HASHES: [u64; 8] = build_hashes::<8>(600);
+const SIDE_HASH: u64 = mix64(700);
+
+const fn build_piece_hashes() -> [u64; 12 * 64] {
+    let mut hashes = [0; 12 * 64];
+    let mut piece = 0;
+    while piece < 12 {
+        let color_key = if piece < 6 { 1 } else { 2 };
+        let kind = piece % 6 + 1;
+        let mut square = 0;
+        while square < 64 {
+            hashes[piece * 64 + square] = mix64(square as u64 + 64 * (kind as u64 + 8 * color_key));
+            square += 1;
+        }
+        piece += 1;
+    }
+    hashes
+}
+
+const fn build_hashes<const N: usize>(base: u64) -> [u64; N] {
+    let mut hashes = [0; N];
+    let mut index = 0;
+    while index < N {
+        hashes[index] = mix64(base + index as u64);
+        index += 1;
+    }
+    hashes
 }
 
 /// Maps a color to the 0/1 index used by the `occupancy` array.
