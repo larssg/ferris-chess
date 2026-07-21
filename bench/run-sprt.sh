@@ -17,7 +17,7 @@ test -f "$openings"
 cutechess-cli \
   -engine "cmd=$rust_engine" name=FerrisChess proto=uci \
   -engine "cmd=$GOCHESS_BIN" name=GoChess-c3da983 proto=uci \
-  -each tc=10+0.1 option.Hash=64 \
+  -each tc=10+0.1 option.Hash=64 option.Threads=1 \
   -openings "file=$openings" format=pgn order=random plies=16 \
   -srand 1 -repeat -games "$games" \
   -sprt elo0=0 elo1=20 alpha=0.05 beta=0.05 \

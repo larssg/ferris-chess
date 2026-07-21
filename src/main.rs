@@ -9,6 +9,34 @@ use std::{
     time::Duration,
 };
 
+const UCI_OPTIONS: &str = "option name Hash type spin default 64 min 1 max 4096\n\
+option name Threads type spin default 1 min 1 max 1\n\
+option name OwnBook type check default true";
+
+/// Splits `setoption name X [value Y]` without baking option names into the
+/// protocol parser. UCI option names may contain spaces, so token positions are
+/// more reliable than assuming the name is always the second word.
+fn parse_setoption(parts: &[&str]) -> Option<(String, String)> {
+    let name = parts.iter().position(|part| *part == "name")?;
+    let value = parts.iter().position(|part| *part == "value")?;
+    (name < value).then(|| {
+        (
+            parts[name + 1..value].join(" ").to_ascii_lowercase(),
+            parts[value + 1..].join(" "),
+        )
+    })
+}
+
+/// FerrisChess is deliberately single-threaded until lazy SMP is implemented.
+/// Clamp a syntactically valid request to the only supported worker count.
+fn parse_thread_count(value: &str) -> Option<usize> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|threads| *threads > 0)
+        .map(|_| 1)
+}
+
 /// A search in flight on a worker thread. The thread owns the [`Engine`] and
 /// hands it back when it finishes; `control` is our clone of its stop/ponder handle.
 struct RunningSearch {
@@ -94,7 +122,7 @@ fn main() {
         }
         match parts[0] {
             "uci" => println!(
-                "id name FerrisChess 0.1\nid author LarsSG and OpenAI\noption name Hash type spin default 64 min 1 max 4096\noption name OwnBook type check default true\nuciok"
+                "id name FerrisChess 0.1\nid author LarsSG and OpenAI\n{UCI_OPTIONS}\nuciok"
             ),
             "isready" => println!("readyok"),
             "ucinewgame" => {
@@ -103,22 +131,21 @@ fn main() {
                 move_history.clear();
                 engine.as_mut().unwrap().clear()
             }
-            // Parse the advertised Hash and OwnBook options; unknown options
-            // are silently ignored as required by UCI.
+            // Parse advertised options; unknown options are silently ignored
+            // as required by UCI.
             "setoption" => {
                 stop_search(&mut running, &mut engine);
-                if let (Some(name), Some(value)) = (
-                    parts.iter().position(|p| *p == "name"),
-                    parts.iter().position(|p| *p == "value"),
-                ) && name < value
-                {
-                    let option = parts[name + 1..value].join(" ").to_ascii_lowercase();
-                    let setting = parts[value + 1..].join(" ");
+                if let Some((option, setting)) = parse_setoption(&parts) {
                     match option.as_str() {
                         "hash" => {
                             if let Ok(mb) = setting.parse::<usize>() {
                                 engine.as_mut().unwrap().set_hash_mb(mb.clamp(1, 4096));
                             }
+                        }
+                        // The option is accepted for GUI and match-runner
+                        // compatibility, but one remains the only worker count.
+                        "threads" => {
+                            let _ = parse_thread_count(&setting);
                         }
                         "ownbook" => own_book = setting.eq_ignore_ascii_case("true"),
                         _ => {}
@@ -358,5 +385,23 @@ mod tests {
         let remaining = Duration::from_secs(300);
         let (_, hard) = time_budget(remaining, Duration::ZERO, None);
         assert!(hard <= remaining / 2);
+    }
+
+    #[test]
+    fn setoption_parser_handles_names_and_values() {
+        assert_eq!(
+            parse_setoption(&["setoption", "name", "Own", "Book", "value", "true"]),
+            Some(("own book".into(), "true".into()))
+        );
+        assert_eq!(parse_setoption(&["setoption", "name", "Hash"]), None);
+    }
+
+    #[test]
+    fn threads_is_fixed_to_one_worker() {
+        assert_eq!(parse_thread_count("1"), Some(1));
+        assert_eq!(parse_thread_count("32"), Some(1));
+        assert_eq!(parse_thread_count("0"), None);
+        assert_eq!(parse_thread_count("many"), None);
+        assert!(UCI_OPTIONS.contains("option name Threads type spin default 1 min 1 max 1"));
     }
 }

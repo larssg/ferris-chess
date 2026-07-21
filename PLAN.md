@@ -81,8 +81,9 @@ Implemented public interfaces and behavior include:
   adaptive soft/hard time budgets that respond to search instability.
 - The complete 108-position GoChess opening repertoire with legal-move
   validation, move-history lookup, `OwnBook`, and `searchmoves` bypass.
+- Explicit fixed-one-worker `Threads` UCI semantics and SPRT configuration.
 
-At the current worktree checkpoint, all 26 Rust tests, warning-free Clippy,
+At the current worktree checkpoint, all 28 Rust tests, warning-free Clippy,
 release builds, GoChess tests, and UCI smoke tests passed.
 
 ## Recorded baseline
@@ -130,7 +131,7 @@ Opening-book parity does not affect the explicit benchmark search path.
 
 Port the next measured GoChess search-behavior batch:
 
-1. `Threads` option semantics and remaining differential parity fixtures.
+1. Add the remaining differential parity fixtures.
 2. Run the first Cute Chess non-inferiority SPRT and use its result to select
    any remaining parity work.
 

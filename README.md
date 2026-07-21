@@ -15,6 +15,7 @@ complete legal chess core and classical alpha-beta search.
 - UCI `depth`, `movetime`, `nodes`, and clock/increment time controls
 - Asynchronous UCI search with responsive `stop`, `ponder`, and `ponderhit`
 - Thread-safe library search cancellation through `SearchHandle`
+- Explicit single-worker UCI `Threads` compatibility for match runners
 - Material, piece-square, and bishop-pair evaluation
 
 ## Build and run
@@ -33,6 +34,9 @@ position startpos moves e2e4 e7e5
 go depth 8
 quit
 ```
+
+UCI options are `Hash` (1–4096 MB), `OwnBook`, and `Threads`. `Threads` is
+currently fixed at one; multi-worker lazy SMP is a later milestone.
 
 ## Validation
 
