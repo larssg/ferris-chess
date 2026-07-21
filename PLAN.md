@@ -146,6 +146,10 @@ Move ordering now caches its score by packed move before sorting, so expensive
 SEE is evaluated once per capture instead of repeatedly by the sort comparator.
 The 164,847-node depth-7 benchmark fell from 278 ms to 221--240 ms (up to
 roughly 746k NPS) with identical scores, best moves, PVs, and node counts.
+A macOS `sample` profile then exposed per-node heap allocation in insufficient-
+material detection. Replacing its mailbox collection with bitboard counts
+reduced the 514,650-node depth-9 benchmark from 716 ms to 676--697 ms (up to
+roughly 761k NPS), again without changing deterministic output.
 
 ## Next checkpoint
 

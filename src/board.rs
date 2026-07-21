@@ -957,15 +957,17 @@ impl Board {
     /// tracked by the search, not here, since it needs the move history.
     pub fn is_draw(&self) -> bool {
         self.halfmove >= 100 || {
-            let non_kings: Vec<_> = self
-                .squares
-                .iter()
-                .flatten()
-                .filter(|p| p.kind != PieceKind::King)
-                .collect();
-            non_kings.is_empty()
-                || (non_kings.len() == 1
-                    && matches!(non_kings[0].kind, PieceKind::Bishop | PieceKind::Knight))
+            let kings = self.pieces(Color::White, PieceKind::King)
+                | self.pieces(Color::Black, PieceKind::King);
+            let non_kings = self.occupied() & !kings;
+            non_kings == 0
+                || (non_kings.count_ones() == 1
+                    && non_kings
+                        & (self.pieces(Color::White, PieceKind::Bishop)
+                            | self.pieces(Color::Black, PieceKind::Bishop)
+                            | self.pieces(Color::White, PieceKind::Knight)
+                            | self.pieces(Color::Black, PieceKind::Knight))
+                        != 0)
         }
     }
     /// Counts the leaf nodes reachable in exactly `depth` plies — the standard
@@ -1164,6 +1166,40 @@ mod tests {
             b.to_fen(),
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
         )
+    }
+
+    #[test]
+    fn draw_detection_covers_clocks_and_insufficient_material() {
+        assert!(
+            Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1")
+                .unwrap()
+                .is_draw()
+        );
+        assert!(
+            Board::from_fen("4k3/8/8/8/8/8/8/3BK3 w - - 0 1")
+                .unwrap()
+                .is_draw()
+        );
+        assert!(
+            Board::from_fen("4k3/8/8/8/8/8/8/3NK3 w - - 0 1")
+                .unwrap()
+                .is_draw()
+        );
+        assert!(
+            !Board::from_fen("4k3/8/8/8/8/8/8/3RK3 w - - 0 1")
+                .unwrap()
+                .is_draw()
+        );
+        assert!(
+            !Board::from_fen("4k3/8/8/8/8/8/8/2BBK3 w - - 0 1")
+                .unwrap()
+                .is_draw()
+        );
+        assert!(
+            Board::from_fen("4k3/8/8/8/8/8/8/3RK3 w - - 100 1")
+                .unwrap()
+                .is_draw()
+        );
     }
 
     #[test]
