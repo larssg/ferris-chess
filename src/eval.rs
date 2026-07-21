@@ -8,7 +8,7 @@
 //! This module also hosts [`static_exchange_eval`] (SEE), which the search uses
 //! to score captures without playing them out on the board.
 
-use crate::{Board, Color, Move, Piece, PieceKind, board};
+use crate::{Board, Color, Move, PieceKind, board};
 
 // Piece values in centipawns (pawn..king). The king's nominal 20,000 keeps it
 // from ever being "won" in SEE arithmetic.
@@ -41,6 +41,33 @@ pub(crate) const fn piece_value(kind: PieceKind) -> i32 {
     VALUES[kind as usize - 1]
 }
 
+/// Material plus middlegame piece-square value for every piece/square slot of
+/// the `Board::pieces` array, signed White-positive with Black squares
+/// pre-mirrored. The board keeps a running sum of these entries as pieces are
+/// placed and removed, so [`evaluate`] starts from that total instead of
+/// walking every piece; the endgame king-table switch is applied there as a
+/// per-king correction on top.
+pub(crate) const MATERIAL_PST: [[i32; 64]; 12] = build_material_pst();
+
+const fn build_material_pst() -> [[i32; 64]; 12] {
+    let mut table = [[0; 64]; 12];
+    let mut slot = 0;
+    while slot < 12 {
+        // Slots 0..6 are White, 6..12 Black, ordered by `PieceKind` within.
+        let kind = slot % 6;
+        let white = slot < 6;
+        let mut square = 0;
+        while square < 64 {
+            let oriented = if white { square } else { square ^ 56 };
+            let value = VALUES[kind] + PST[kind][oriented] as i32;
+            table[slot][square] = if white { value } else { -value };
+            square += 1;
+        }
+        slot += 1;
+    }
+    table
+}
+
 /// Whether to use endgame evaluation, using the reference's discrete rule: no
 /// queens on either side, or a lone queen backed by at most one minor and no
 /// rook. This switches the king's piece-square table and enables mop-up.
@@ -55,22 +82,6 @@ fn is_endgame(board: &Board) -> bool {
     wq == 0 && bq == 0 || wq > 0 && wm <= 1 && wr == 0 || bq > 0 && bm <= 1 && br == 0
 }
 
-/// Looks up the piece-square bonus for a piece on a square. Black is mirrored to
-/// White's orientation so a single set of tables serves both colors.
-fn pst(piece: Piece, square: u8, endgame: bool) -> i32 {
-    let square = if piece.color == Color::White {
-        square
-    } else {
-        square ^ 56
-    } as usize;
-    let table = if piece.kind == PieceKind::King && endgame {
-        6
-    } else {
-        piece.kind as usize - 1
-    };
-    i32::from(PST[table][square])
-}
-
 /// The full static evaluation, in centipawns from the side-to-move's point of
 /// view (positive = the side to move is better).
 ///
@@ -79,20 +90,19 @@ fn pst(piece: Piece, square: u8, endgame: bool) -> i32 {
 /// White-positive throughout and only flipped to side-relative at the return.
 pub fn evaluate(board: &Board) -> i32 {
     let endgame = is_endgame(board);
-    let mut score = 0;
-    for color in [Color::White, Color::Black] {
-        for kind in [
-            PieceKind::Pawn,
-            PieceKind::Knight,
-            PieceKind::Bishop,
-            PieceKind::Rook,
-            PieceKind::Queen,
-            PieceKind::King,
-        ] {
-            let piece = Piece { color, kind };
-            for square in bit_squares(board.pieces(color, kind)) {
-                let value = piece_value(kind) + pst(piece, square, endgame);
-                score += if color == Color::White { value } else { -value };
+    // Material and piece-square values are maintained incrementally by
+    // make/unmake; only the endgame king-table switch is applied here.
+    let mut score = board.material_pst();
+    if endgame {
+        for color in [Color::White, Color::Black] {
+            for square in bit_squares(board.pieces(color, PieceKind::King)) {
+                let oriented = (if color == Color::White {
+                    square
+                } else {
+                    square ^ 56
+                }) as usize;
+                let swap = i32::from(PST[6][oriented]) - i32::from(PST[5][oriented]);
+                score += if color == Color::White { swap } else { -swap };
             }
         }
     }

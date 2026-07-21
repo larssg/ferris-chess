@@ -112,6 +112,9 @@ pub struct Board {
     pieces: [u64; 12],
     /// Per-color occupancy, indexed by [`color_index`].
     occupancy: [u64; 2],
+    /// Running White-positive material-plus-piece-square total, maintained as
+    /// pieces are placed and removed so evaluation need not walk every piece.
+    material_pst: i32,
     pub side: Color,
     pub castling: u8,
     pub en_passant: Option<u8>,
@@ -241,6 +244,7 @@ impl Board {
             squares,
             pieces: [0; 12],
             occupancy: [0; 2],
+            material_pst: 0,
             side,
             castling,
             en_passant,
@@ -945,18 +949,28 @@ impl Board {
         h
     }
 
-    /// Recomputes the derived `pieces`/`occupancy` bitboards from the mailbox.
-    /// Called after every mutation so the two representations never drift.
+    /// Recomputes the derived `pieces`/`occupancy` bitboards and the material
+    /// accumulator from the mailbox. Called after every wholesale rebuild (FEN
+    /// parsing) so the representations never drift.
     fn rebuild_bitboards(&mut self) {
         self.pieces = [0; 12];
         self.occupancy = [0; 2];
+        self.material_pst = 0;
         for (square, piece) in self.squares.iter().copied().enumerate() {
             if let Some(piece) = piece {
                 let bit = 1u64 << square;
                 self.pieces[piece_index(piece)] |= bit;
                 self.occupancy[color_index(piece.color)] |= bit;
+                self.material_pst += crate::eval::MATERIAL_PST[piece_index(piece)][square];
             }
         }
+    }
+
+    /// The running White-positive material-plus-piece-square total. Exact:
+    /// every placement and removal adjusts it, and unmake replays them in
+    /// reverse, so it always equals a from-scratch recomputation.
+    pub(crate) fn material_pst(&self) -> i32 {
+        self.material_pst
     }
 
     /// Removes a piece from both board representations.
@@ -966,6 +980,7 @@ impl Board {
         self.pieces[piece_index(piece)] &= !bit;
         self.occupancy[color_index(piece.color)] &= !bit;
         self.hash ^= piece_hash(piece, square);
+        self.material_pst -= crate::eval::MATERIAL_PST[piece_index(piece)][square as usize];
         Some(piece)
     }
 
@@ -977,6 +992,7 @@ impl Board {
         self.pieces[piece_index(piece)] |= bit;
         self.occupancy[color_index(piece.color)] |= bit;
         self.hash ^= piece_hash(piece, square);
+        self.material_pst += crate::eval::MATERIAL_PST[piece_index(piece)][square as usize];
     }
 }
 
@@ -1419,6 +1435,31 @@ mod tests {
                 let undo = board.make_move(chess_move);
                 board.unmake_move(chess_move, undo);
                 assert_eq!(board, original, "failed to restore {chess_move} from {fen}");
+            }
+        }
+    }
+
+    #[test]
+    fn material_accumulator_matches_recomputation_after_every_root_move() {
+        // Make+unmake symmetry alone could hide an update that is wrong the
+        // same way in both directions, so compare against a from-scratch
+        // rebuild after each move. The positions cover captures, castling,
+        // en passant, and promotion.
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 7 19",
+            "4k3/P6p/8/3pP3/8/8/7P/4K3 w - d6 31 72",
+        ] {
+            let mut board = Board::from_fen(fen).unwrap();
+            for chess_move in board.legal_moves() {
+                let undo = board.make_move(chess_move);
+                let rebuilt = Board::from_fen(&board.to_fen()).unwrap();
+                assert_eq!(
+                    board.material_pst(),
+                    rebuilt.material_pst(),
+                    "accumulator drifted after {chess_move} from {fen}"
+                );
+                board.unmake_move(chess_move, undo);
             }
         }
     }
