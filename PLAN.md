@@ -150,6 +150,9 @@ A macOS `sample` profile then exposed per-node heap allocation in insufficient-
 material detection. Replacing its mailbox collection with bitboard counts
 reduced the 514,650-node depth-9 benchmark from 716 ms to 676--697 ms (up to
 roughly 761k NPS), again without changing deterministic output.
+Bitboard king lookup, precomputed knight/king attack masks, and bitboard-backed
+slider blocker tests then reduced the same depth-9 benchmark to 434--444 ms
+(up to roughly 1.19M NPS), preserving all deterministic results and perft.
 
 ## Next checkpoint
 

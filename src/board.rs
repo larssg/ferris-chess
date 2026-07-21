@@ -412,14 +412,8 @@ impl Board {
 
     /// The square of `color`'s king, or `None` if it is absent (e.g. mid-analysis positions).
     pub fn king_square(&self, color: Color) -> Option<u8> {
-        let king = Piece {
-            color,
-            kind: PieceKind::King,
-        };
-        self.squares
-            .iter()
-            .position(|&p| p == Some(king))
-            .map(|sq| sq as u8)
+        let kings = self.pieces(color, PieceKind::King);
+        (kings != 0).then(|| kings.trailing_zeros() as u8)
     }
 
     /// The bitboard of pieces of a given color and kind.
@@ -874,57 +868,37 @@ impl Board {
     pub fn square_attacked(&self, sq: u8, by: Color) -> bool {
         let f = (sq % 8) as i8;
         let r = (sq / 8) as i8;
-        // Knight attackers.
-        for (df, dr) in [
-            (-2, -1),
-            (-2, 1),
-            (-1, -2),
-            (-1, 2),
-            (1, -2),
-            (1, 2),
-            (2, -1),
-            (2, 1),
-        ] {
-            if offset(f, r, df, dr).is_some_and(|s| {
-                self.squares[s as usize]
-                    == Some(Piece {
-                        color: by,
-                        kind: PieceKind::Knight,
-                    })
-            }) {
-                return true;
-            }
+        if KNIGHT_ATTACKS[sq as usize] & self.pieces(by, PieceKind::Knight) != 0 {
+            return true;
         }
         // Pawn attackers sit one rank *toward* `by`'s home side of the target.
         let pd = if by == Color::White { -1 } else { 1 };
         for df in [-1, 1] {
-            if offset(f, r, df, pd).is_some_and(|s| {
-                self.squares[s as usize]
-                    == Some(Piece {
-                        color: by,
-                        kind: PieceKind::Pawn,
-                    })
-            }) {
+            if offset(f, r, df, pd)
+                .is_some_and(|s| self.pieces(by, PieceKind::Pawn) & (1u64 << s) != 0)
+            {
                 return true;
             }
         }
         // Sliding attackers: orthogonal rays can hold a rook or queen, diagonal
         // rays a bishop or queen. Each ray stops at the first occupied square.
-        for (dirs, kinds) in [
+        let occupied = self.occupied();
+        for (dirs, attackers) in [
             (
                 &[(1, 0), (-1, 0), (0, 1), (0, -1)][..],
-                &[PieceKind::Rook, PieceKind::Queen][..],
+                self.pieces(by, PieceKind::Rook) | self.pieces(by, PieceKind::Queen),
             ),
             (
                 &[(1, 1), (1, -1), (-1, 1), (-1, -1)][..],
-                &[PieceKind::Bishop, PieceKind::Queen][..],
+                self.pieces(by, PieceKind::Bishop) | self.pieces(by, PieceKind::Queen),
             ),
         ] {
             for &(df, dr) in dirs {
                 let (mut nf, mut nr) = (f + df, r + dr);
                 while (0..8).contains(&nf) && (0..8).contains(&nr) {
-                    if let Some(p) = self.squares[(nr * 8 + nf) as usize] {
-                        if p.color == by && kinds.contains(&p.kind) {
+                    let bit = 1u64 << (nr * 8 + nf);
+                    if occupied & bit != 0 {
+                        if attackers & bit != 0 {
                             return true;
                         }
                         break;
@@ -934,23 +908,7 @@ impl Board {
                 }
             }
         }
-        // Enemy king on an adjacent square.
-        for df in -1..=1 {
-            for dr in -1..=1 {
-                if (df != 0 || dr != 0)
-                    && offset(f, r, df, dr).is_some_and(|s| {
-                        self.squares[s as usize]
-                            == Some(Piece {
-                                color: by,
-                                kind: PieceKind::King,
-                            })
-                    })
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        KING_ATTACKS[sq as usize] & self.pieces(by, PieceKind::King) != 0
     }
     /// Whether the position is drawn by the 50-move rule or by insufficient
     /// material (bare kings, or king plus a single minor piece). Repetition is
@@ -1057,6 +1015,48 @@ impl FromStr for Board {
 fn offset(f: i8, r: i8, df: i8, dr: i8) -> Option<u8> {
     let (nf, nr) = (f + df, r + dr);
     ((0..8).contains(&nf) && (0..8).contains(&nr)).then_some((nr * 8 + nf) as u8)
+}
+
+const KNIGHT_ATTACKS: [u64; 64] = attack_table(&[
+    (-2, -1),
+    (-2, 1),
+    (-1, -2),
+    (-1, 2),
+    (1, -2),
+    (1, 2),
+    (2, -1),
+    (2, 1),
+]);
+const KING_ATTACKS: [u64; 64] = attack_table(&[
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, -1),
+    (0, 1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+]);
+
+/// Builds target-centric leaper masks at compile time.
+const fn attack_table(offsets: &[(i8, i8)]) -> [u64; 64] {
+    let mut table = [0; 64];
+    let mut square = 0;
+    while square < 64 {
+        let file = (square % 8) as i8;
+        let rank = (square / 8) as i8;
+        let mut index = 0;
+        while index < offsets.len() {
+            let target_file = file + offsets[index].0;
+            let target_rank = rank + offsets[index].1;
+            if target_file >= 0 && target_file < 8 && target_rank >= 0 && target_rank < 8 {
+                table[square] |= 1u64 << (target_rank * 8 + target_file);
+            }
+            index += 1;
+        }
+        square += 1;
+    }
+    table
 }
 /// Emits sliding moves for a bishop/rook/queen: walk each direction until the
 /// edge, adding quiet moves onto empty squares and a capture onto the first
