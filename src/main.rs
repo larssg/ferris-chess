@@ -81,6 +81,37 @@ fn main() {
                             i += 1;
                             limits.nodes = parts.get(i).and_then(|s| s.parse().ok())
                         }
+                        "mate" => {
+                            i += 1;
+                            limits.mate = parts.get(i).and_then(|s| s.parse().ok())
+                        }
+                        "ponder" => limits.ponder = true,
+                        "infinite" => limits.infinite = true,
+                        "searchmoves" => {
+                            i += 1;
+                            while i < parts.len()
+                                && !matches!(
+                                    parts[i],
+                                    "depth"
+                                        | "movetime"
+                                        | "nodes"
+                                        | "mate"
+                                        | "wtime"
+                                        | "btime"
+                                        | "winc"
+                                        | "binc"
+                                        | "movestogo"
+                                        | "ponder"
+                                        | "infinite"
+                                )
+                            {
+                                if let Some(chess_move) = board.parse_move(parts[i]) {
+                                    limits.root_moves.push(chess_move);
+                                }
+                                i += 1;
+                            }
+                            i = i.saturating_sub(1);
+                        }
                         "wtime" => {
                             i += 1;
                             wtime = parts.get(i).and_then(|s| s.parse().ok());
@@ -125,14 +156,21 @@ fn main() {
                     let target = safe / moves_to_go + inc * 3 / 4;
                     limits.time = Duration::from_millis(target.clamp(20, (safe / 2).max(20)));
                 }
+                limits.white_time = wtime.map(Duration::from_millis);
+                limits.black_time = btime.map(Duration::from_millis);
+                limits.white_increment = Duration::from_millis(winc);
+                limits.black_increment = Duration::from_millis(binc);
+                limits.moves_to_go = Some(moves_to_go as u32);
                 let r = engine.search(&board, limits, |r| {
                     println!(
-                        "info depth {} score cp {} nodes {} time {} nps {} pv {}",
+                        "info depth {} seldepth {} score cp {} nodes {} time {} nps {} hashfull {} pv {}",
                         r.depth,
+                        r.seldepth,
                         r.score,
                         r.nodes,
                         r.elapsed.as_millis(),
-                        r.nodes * 1000 / (r.elapsed.as_millis() as u64).max(1),
+                        r.nps,
+                        r.hashfull,
                         r.pv.iter()
                             .map(ToString::to_string)
                             .collect::<Vec<_>>()

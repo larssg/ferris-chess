@@ -2,11 +2,20 @@ use crate::{Board, Color, Move, PieceKind};
 use std::time::{Duration, Instant};
 const INF: i32 = 100_000;
 const MATE: i32 = 90_000;
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SearchLimits {
     pub depth: u8,
     pub time: Duration,
     pub nodes: Option<u64>,
+    pub white_time: Option<Duration>,
+    pub black_time: Option<Duration>,
+    pub white_increment: Duration,
+    pub black_increment: Duration,
+    pub moves_to_go: Option<u32>,
+    pub mate: Option<u8>,
+    pub ponder: bool,
+    pub infinite: bool,
+    pub root_moves: Vec<Move>,
 }
 impl Default for SearchLimits {
     fn default() -> Self {
@@ -14,17 +23,46 @@ impl Default for SearchLimits {
             depth: 64,
             time: Duration::from_secs(5),
             nodes: None,
+            white_time: None,
+            black_time: None,
+            white_increment: Duration::ZERO,
+            black_increment: Duration::ZERO,
+            moves_to_go: None,
+            mate: None,
+            ponder: false,
+            infinite: false,
+            root_moves: Vec::new(),
         }
     }
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScoreType {
+    Centipawn,
+    Mate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminationReason {
+    Depth,
+    Time,
+    Nodes,
+    Mate,
+    NoLegalMoves,
+}
+
 #[derive(Clone, Debug)]
 pub struct SearchResult {
     pub best_move: Option<Move>,
     pub score: i32,
     pub depth: u8,
+    pub seldepth: u8,
     pub nodes: u64,
+    pub nps: u64,
+    pub hashfull: u16,
     pub elapsed: Duration,
     pub pv: Vec<Move>,
+    pub score_type: ScoreType,
+    pub termination: TerminationReason,
 }
 const BOUND_EXACT: u8 = 0;
 const BOUND_LOWER: u8 = 1;
@@ -121,6 +159,18 @@ impl TranspositionTable {
             flags: generation << 2 | entry.bound,
         };
     }
+
+    fn hashfull(&self) -> u16 {
+        let mut total = 0usize;
+        let mut used = 0usize;
+        for cluster in self.clusters.iter().take(250) {
+            for slot in cluster.slots {
+                total += 1;
+                used += usize::from(slot.depth != 0 && slot.flags >> 2 == self.generation);
+            }
+        }
+        (used * 1000).checked_div(total).unwrap_or(0) as u16
+    }
 }
 pub struct Engine {
     tt: TranspositionTable,
@@ -132,6 +182,8 @@ pub struct Engine {
     limit: Duration,
     node_limit: Option<u64>,
     stopped: bool,
+    seldepth: u8,
+    termination: TerminationReason,
 }
 impl Default for Engine {
     fn default() -> Self {
@@ -150,6 +202,8 @@ impl Engine {
             limit: Duration::ZERO,
             node_limit: None,
             stopped: false,
+            seldepth: 0,
+            termination: TerminationReason::Depth,
         }
     }
     pub fn clear(&mut self) {
@@ -170,17 +224,28 @@ impl Engine {
         self.limit = limits.time;
         self.node_limit = limits.nodes;
         self.stopped = false;
+        self.seldepth = 0;
+        self.termination = TerminationReason::Depth;
         self.tt.new_search();
         let mut result = SearchResult {
             best_move: None,
             score: 0,
             depth: 0,
+            seldepth: 0,
             nodes: 0,
+            nps: 0,
+            hashfull: 0,
             elapsed: Duration::ZERO,
             pv: vec![],
+            score_type: ScoreType::Centipawn,
+            termination: TerminationReason::Depth,
         };
-        let legal = b.legal_moves();
+        let mut legal = b.legal_moves();
+        if !limits.root_moves.is_empty() {
+            legal.retain(|chess_move| limits.root_moves.contains(chess_move));
+        }
         if legal.is_empty() {
+            result.termination = TerminationReason::NoLegalMoves;
             return result;
         }
         result.best_move = Some(legal[0]);
@@ -192,8 +257,9 @@ impl Engine {
                 (-INF, INF)
             };
             loop {
-                let (score, best) = self.root(&mut board, depth, alpha, beta);
+                let (score, best) = self.root(&mut board, depth, alpha, beta, &legal);
                 if self.stopped {
+                    result.termination = self.termination;
                     return result;
                 }
                 if score <= alpha {
@@ -211,16 +277,37 @@ impl Engine {
             result.depth = depth;
             result.nodes = self.nodes;
             result.elapsed = self.start.elapsed();
+            result.seldepth = self.seldepth;
+            result.nps = self.nodes * 1000 / (result.elapsed.as_millis() as u64).max(1);
+            result.hashfull = self.tt.hashfull();
             result.pv = self.extract_pv(b, depth);
+            result.score_type = if result.score.abs() >= MATE - 64 {
+                ScoreType::Mate
+            } else {
+                ScoreType::Centipawn
+            };
             info(&result);
             if result.score.abs() > MATE - 64 || self.start.elapsed() >= self.limit / 2 {
+                result.termination = if result.score.abs() > MATE - 64 {
+                    TerminationReason::Mate
+                } else {
+                    TerminationReason::Time
+                };
                 break;
             }
         }
         result
     }
-    fn root(&mut self, b: &mut Board, depth: u8, mut alpha: i32, beta: i32) -> (i32, Option<Move>) {
+    fn root(
+        &mut self,
+        b: &mut Board,
+        depth: u8,
+        mut alpha: i32,
+        beta: i32,
+        root_moves: &[Move],
+    ) -> (i32, Option<Move>) {
         let mut moves = b.legal_moves();
+        moves.retain(|chess_move| root_moves.contains(chess_move));
         self.order(b, &mut moves, 0);
         let mut best = None;
         for m in moves {
@@ -261,6 +348,7 @@ impl Engine {
         pv: bool,
     ) -> i32 {
         self.nodes += 1;
+        self.seldepth = self.seldepth.max(ply);
         if ply >= 63 {
             return evaluate(b);
         }
@@ -269,6 +357,11 @@ impl Engine {
                 || self.node_limit.is_some_and(|n| self.nodes >= n))
         {
             self.stopped = true;
+            self.termination = if self.node_limit.is_some_and(|n| self.nodes >= n) {
+                TerminationReason::Nodes
+            } else {
+                TerminationReason::Time
+            };
             return 0;
         }
         if b.is_draw()
@@ -369,6 +462,7 @@ impl Engine {
     }
     fn qsearch(&mut self, b: &mut Board, mut alpha: i32, beta: i32, ply: u8) -> i32 {
         self.nodes += 1;
+        self.seldepth = self.seldepth.max(ply);
         if ply >= 63 {
             return evaluate(b);
         }
@@ -549,6 +643,7 @@ mod tests {
                 depth: 3,
                 time: Duration::from_secs(1),
                 nodes: None,
+                ..SearchLimits::default()
             },
             |_| {},
         );
@@ -598,5 +693,25 @@ mod tests {
         let entry = table.get(42, 3).unwrap();
         assert_eq!(entry.score, MATE - 3);
         assert_eq!(entry.best, chess_move);
+    }
+
+    #[test]
+    fn search_honors_root_move_restrictions() {
+        let board = Board::startpos();
+        let only_move = board.parse_move("a2a3").unwrap();
+        let mut engine = Engine::new();
+        let result = engine.search(
+            &board,
+            SearchLimits {
+                depth: 2,
+                time: Duration::from_secs(1),
+                root_moves: vec![only_move],
+                ..SearchLimits::default()
+            },
+            |_| {},
+        );
+        assert_eq!(result.best_move, Some(only_move));
+        assert!(result.seldepth >= result.depth);
+        assert!(result.nps > 0);
     }
 }
