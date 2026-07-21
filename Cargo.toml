@@ -1,3 +1,10 @@
+[workspace]
+members = ["gui"]
+# Root builds stay engine-only so `cargo build --release` keeps producing
+# ./target/release/chess for the bench scripts without compiling the GUI.
+default-members = ["."]
+resolver = "3"
+
 [package]
 name = "chess"
 version = "0.1.0"

@@ -1,0 +1,10 @@
+[package]
+name = "chess-gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chess = { path = ".." }
+eframe = "0.35"
+egui = "0.35"
+egui_extras = { version = "0.35", default-features = false, features = ["svg"] }
