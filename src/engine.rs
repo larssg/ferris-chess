@@ -46,6 +46,34 @@ fn lmr_reduction(depth: u8, move_count: usize, pv: bool) -> u8 {
     let base = (0.75 + f64::from(depth).ln() * (move_count as f64).ln() / 2.25) as i32;
     (base - i32::from(pv)).max(1).min(i32::from(depth) - 1) as u8
 }
+
+/// Decides whether iterative deepening should start another depth. A changed
+/// best move or a meaningful score drop gets 50% more thinking time, but the
+/// target remains below the hard deadline so recursion has room to finish.
+#[derive(Clone, Copy)]
+struct Iteration {
+    best: Option<Move>,
+    score: i32,
+}
+
+fn should_stop_iterating(
+    depth: u8,
+    elapsed: Duration,
+    base_soft: Duration,
+    hard: Duration,
+    current: Iteration,
+    previous: Iteration,
+) -> bool {
+    let unstable =
+        depth > 1 && (current.best != previous.best || previous.score - current.score >= 30);
+    let effective = if unstable {
+        base_soft + base_soft / 2
+    } else {
+        base_soft
+    }
+    .min(hard * 4 / 5);
+    elapsed > effective
+}
 /// The stopping conditions for a search, mirroring the UCI `go` parameters. A
 /// search ends when any active limit is reached; the clock fields feed the time
 /// budget computed by the UCI adapter, and `root_moves` restricts the search to
@@ -53,7 +81,10 @@ fn lmr_reduction(depth: u8, move_count: usize, pv: bool) -> u8 {
 #[derive(Clone, Debug)]
 pub struct SearchLimits {
     pub depth: u8,
+    /// Absolute deadline. Search recursion never runs beyond this budget.
     pub time: Duration,
+    /// Target for starting another iteration. Instability may extend it.
+    pub soft_time: Option<Duration>,
     pub nodes: Option<u64>,
     pub white_time: Option<Duration>,
     pub black_time: Option<Duration>,
@@ -70,6 +101,7 @@ impl Default for SearchLimits {
         Self {
             depth: 64,
             time: Duration::from_secs(5),
+            soft_time: None,
             nodes: None,
             white_time: None,
             black_time: None,
@@ -381,6 +413,29 @@ impl Engine {
         self.tt.clear();
         self.hashes.clear()
     }
+    /// Starts a new real-game history, normally for a UCI `position` command.
+    pub fn reset_game_history(&mut self) {
+        self.hashes.clear();
+    }
+    /// Records the position immediately before a real game move is played.
+    pub fn append_game_hash(&mut self, hash: u64) {
+        self.hashes.push(hash);
+    }
+    /// Reports whether the current position has appeared twice previously.
+    pub fn is_threefold_repetition(&self, b: &Board) -> bool {
+        self.repetition_count(b) >= 2
+    }
+
+    fn repetition_count(&self, b: &Board) -> usize {
+        self.hashes
+            .iter()
+            .rev()
+            .take(b.halfmove as usize)
+            .skip(1)
+            .step_by(2)
+            .filter(|hash| **hash == b.hash)
+            .count()
+    }
     /// Reallocates the transposition table to the given size (`setoption Hash`).
     pub fn set_hash_mb(&mut self, mb: usize) {
         self.tt = TranspositionTable::with_mb(mb);
@@ -421,6 +476,7 @@ impl Engine {
         self.time_enabled = !limits.infinite;
         self.control = control;
         self.tt.new_search();
+        let base_soft = limits.soft_time.unwrap_or(limits.time / 2);
         let mut result = SearchResult {
             best_move: None,
             score: 0,
@@ -446,6 +502,8 @@ impl Engine {
         // Seed a fallback so an immediate stop still returns a legal move.
         result.best_move = Some(legal[0]);
         let mut board = b.clone();
+        let mut previous_best = None;
+        let mut previous_score = 0;
         for depth in 1..=limits.depth {
             // Aspiration windows: after the first depth, search a narrow window
             // centered on the previous score, widening on a fail high/low. A
@@ -502,11 +560,27 @@ impl Engine {
                 ScoreType::Centipawn
             };
             info(&result);
-            // Stop early once a mate is proven, or once we have used half the
-            // time budget — starting another full depth would likely overrun it.
-            if result.score.abs() > MATE - 64
-                || (self.time_enabled && !self.pondering && self.start.elapsed() >= self.limit / 2)
-            {
+            let stop_for_time = self.time_enabled
+                && !self.pondering
+                && should_stop_iterating(
+                    depth,
+                    self.start.elapsed(),
+                    base_soft,
+                    self.limit,
+                    Iteration {
+                        best: result.best_move,
+                        score: result.score,
+                    },
+                    Iteration {
+                        best: previous_best,
+                        score: previous_score,
+                    },
+                );
+            previous_best = result.best_move;
+            previous_score = result.score;
+            // Stop early once a mate is proven, or once the adaptive soft
+            // budget says there is not enough time for another full iteration.
+            if result.score.abs() > MATE - 64 || stop_for_time {
                 result.termination = if result.score.abs() > MATE - 64 {
                     TerminationReason::Mate
                 } else {
@@ -657,15 +731,7 @@ impl Engine {
         // Draw by rule or by repetition. Only positions since the last
         // irreversible move (bounded by the halfmove clock) can repeat, and only
         // same-side-to-move positions (every second entry) are candidates.
-        if b.is_draw()
-            || self
-                .hashes
-                .iter()
-                .rev()
-                .take(b.halfmove as usize)
-                .step_by(2)
-                .any(|h| *h == b.hash)
-        {
+        if b.is_draw() || self.repetition_count(b) > 0 {
             return 0;
         }
         // At the horizon, resolve captures via quiescence search.
@@ -1191,6 +1257,93 @@ fn score_from_tt(score: i32, ply: u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repetition_uses_same_side_and_halfmove_window() {
+        let mut board = Board::startpos();
+        board.halfmove = 10;
+        let mut engine = Engine::new();
+        engine.hashes = vec![board.hash, 0xdead_beef];
+        assert_eq!(engine.repetition_count(&board), 1);
+        engine.hashes = vec![board.hash];
+        assert_eq!(engine.repetition_count(&board), 0);
+        board.halfmove = 1;
+        engine.hashes = vec![board.hash, 0xdead_beef];
+        assert_eq!(engine.repetition_count(&board), 0);
+    }
+
+    #[test]
+    fn game_history_detects_threefold_after_two_knight_shuffles() {
+        let mut board = Board::startpos();
+        let mut engine = Engine::new();
+        let shuffle = ["g1f3", "g8f6", "f3g1", "f6g8"];
+        for turn in 0..2 {
+            for notation in shuffle {
+                let chess_move = board.parse_move(notation).unwrap();
+                engine.append_game_hash(board.hash);
+                board.make_move(chess_move);
+            }
+            assert_eq!(engine.is_threefold_repetition(&board), turn == 1);
+        }
+    }
+
+    #[test]
+    fn unstable_iteration_extends_the_soft_deadline() {
+        let first = Move {
+            from: 12,
+            to: 28,
+            ..Move::default()
+        };
+        let second = Move {
+            from: 6,
+            to: 21,
+            ..Move::default()
+        };
+        let soft = Duration::from_millis(100);
+        let hard = Duration::from_secs(1);
+        assert!(should_stop_iterating(
+            3,
+            Duration::from_millis(120),
+            soft,
+            hard,
+            Iteration {
+                best: Some(first),
+                score: 20
+            },
+            Iteration {
+                best: Some(first),
+                score: 20
+            }
+        ));
+        assert!(!should_stop_iterating(
+            3,
+            Duration::from_millis(120),
+            soft,
+            hard,
+            Iteration {
+                best: Some(second),
+                score: 20
+            },
+            Iteration {
+                best: Some(first),
+                score: 20
+            }
+        ));
+        assert!(!should_stop_iterating(
+            3,
+            Duration::from_millis(120),
+            soft,
+            hard,
+            Iteration {
+                best: Some(first),
+                score: 20
+            },
+            Iteration {
+                best: Some(first),
+                score: 70
+            }
+        ));
+    }
 
     #[test]
     fn history_updates_are_bounded_and_accept_maluses() {

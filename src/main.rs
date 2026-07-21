@@ -28,6 +28,29 @@ fn stop_search(running: &mut Option<RunningSearch>, engine: &mut Option<Engine>)
     }
 }
 
+/// Produces the iterative-deepening target and absolute deadline. Sudden-death
+/// controls assume roughly 30 moves remain and allow slightly more emergency
+/// headroom than an explicit moves-to-go control.
+fn time_budget(
+    remaining: Duration,
+    increment: Duration,
+    moves_to_go: Option<u32>,
+) -> (Duration, Duration) {
+    let overhead = Duration::from_millis(30);
+    let safe = remaining
+        .checked_sub(overhead)
+        .unwrap_or(remaining / 4)
+        .max(remaining / 4);
+    let moves = moves_to_go.unwrap_or(30).clamp(1, 30);
+    let mut soft = safe / moves + increment * 3 / 4;
+    let mut hard = soft * if moves_to_go.is_some() { 4 } else { 5 };
+    hard = hard.min(safe / 2);
+    soft = soft.min(hard);
+    hard = hard.max(Duration::from_millis(50));
+    soft = soft.max(Duration::from_millis(30)).min(hard);
+    (soft, hard)
+}
+
 fn main() {
     // First, give the benchmark harness a chance to handle `bench ...` args.
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -90,6 +113,7 @@ fn main() {
             // then replay any listed moves from it.
             "position" => {
                 stop_search(&mut running, &mut engine);
+                engine.as_mut().unwrap().reset_game_history();
                 let mut i = 1;
                 if parts.get(i) == Some(&"startpos") {
                     board = Board::startpos();
@@ -108,6 +132,7 @@ fn main() {
                 if parts.get(i) == Some(&"moves") {
                     for s in &parts[i + 1..] {
                         if let Some(m) = board.parse_move(s) {
+                            engine.as_mut().unwrap().append_game_hash(board.hash);
                             board.make_move(m);
                         }
                     }
@@ -122,7 +147,7 @@ fn main() {
                 let mut btime: Option<u64> = None;
                 let mut winc = 0u64;
                 let mut binc = 0u64;
-                let mut moves_to_go = 30u64;
+                let mut moves_to_go: Option<u32> = None;
                 let mut i = 1;
                 while i < parts.len() {
                     match parts[i] {
@@ -132,9 +157,11 @@ fn main() {
                         }
                         "movetime" => {
                             i += 1;
-                            limits.time = Duration::from_millis(
+                            let move_time = Duration::from_millis(
                                 parts.get(i).and_then(|s| s.parse().ok()).unwrap_or(5000),
-                            )
+                            );
+                            limits.time = move_time;
+                            limits.soft_time = Some(move_time);
                         }
                         "nodes" => {
                             i += 1;
@@ -192,8 +219,7 @@ fn main() {
                             moves_to_go = parts
                                 .get(i)
                                 .and_then(|s| s.parse().ok())
-                                .unwrap_or(30)
-                                .max(1);
+                                .map(|moves: u32| moves.max(1));
                         }
                         _ => {}
                     }
@@ -215,15 +241,19 @@ fn main() {
                     } else {
                         binc
                     };
-                    let safe = left.saturating_sub(30);
-                    let target = safe / moves_to_go + inc * 3 / 4;
-                    limits.time = Duration::from_millis(target.clamp(20, (safe / 2).max(20)));
+                    let (soft, hard) = time_budget(
+                        Duration::from_millis(left),
+                        Duration::from_millis(inc),
+                        moves_to_go,
+                    );
+                    limits.soft_time = Some(soft);
+                    limits.time = hard;
                 }
                 limits.white_time = wtime.map(Duration::from_millis);
                 limits.black_time = btime.map(Duration::from_millis);
                 limits.white_increment = Duration::from_millis(winc);
                 limits.black_increment = Duration::from_millis(binc);
-                limits.moves_to_go = Some(moves_to_go as u32);
+                limits.moves_to_go = moves_to_go;
                 // Move the engine onto a worker thread; it prints `info` lines as
                 // it searches and a final `bestmove`, then returns the engine.
                 let control = SearchHandle::new(limits.ponder);
@@ -273,4 +303,31 @@ fn main() {
     }
     // Stdin closed: make sure no worker is left running.
     stop_search(&mut running, &mut engine);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn increment_and_moves_to_go_increase_the_soft_budget() {
+        let remaining = Duration::from_secs(300);
+        let (sudden_death, _) = time_budget(remaining, Duration::ZERO, None);
+        let (with_increment, _) = time_budget(remaining, Duration::from_secs(3), None);
+        let (five_moves, _) = time_budget(remaining, Duration::ZERO, Some(5));
+        assert!(with_increment > sudden_death);
+        assert!(five_moves > sudden_death);
+    }
+
+    #[test]
+    fn time_budget_has_safe_floors_and_a_bounded_hard_limit() {
+        let (soft, hard) = time_budget(Duration::from_millis(100), Duration::ZERO, None);
+        assert!(soft > Duration::ZERO);
+        assert!(soft <= hard);
+        assert_eq!(hard, Duration::from_millis(50));
+
+        let remaining = Duration::from_secs(300);
+        let (_, hard) = time_budget(remaining, Duration::ZERO, None);
+        assert!(hard <= remaining / 2);
+    }
 }
