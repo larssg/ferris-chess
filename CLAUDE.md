@@ -5,6 +5,12 @@ exceed) the sibling **GoChess** engine. The end goal is passing a Cute Chess
 SPRT against GoChess; see `PLAN.md` for the full roadmap and `bench/BASELINE.md`
 for measured results.
 
+## Guiding principle
+
+**Write code as a readable narrative.** Prefer names, structure, and comments
+that let a reader follow the intent top to bottom. Comments should explain
+*why*, not restate the code.
+
 ## Quality loop — run before every commit
 
 This is mandatory. Do not commit formatting failures, Clippy warnings, or
