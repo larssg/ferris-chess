@@ -75,8 +75,10 @@ Implemented public interfaces and behavior include:
   pruning through depth 5 with reference margins and thresholds.
 - Logarithmic late-move reductions with full-depth verification and internal
   iterative reduction at deep PV nodes without a transposition-table move.
+- Bounded history gravity with failed-quiet maluses, distinct killers, and
+  countermove ordering tied to the preceding move.
 
-At the current worktree checkpoint, all 17 Rust tests, warning-free Clippy,
+At the current worktree checkpoint, all 20 Rust tests, warning-free Clippy,
 release builds, GoChess tests, and UCI smoke tests passed.
 
 ## Recorded baseline
@@ -114,15 +116,16 @@ and reverse futility pruning reduced it again to 39,436 nodes. Razoring,
 futility pruning, and late-move pruning reduced the total to 17,967 nodes and
 matched GoChess's `f3e5` middlegame best move while preserving the other two
 best moves. Logarithmic late-move reductions and internal iterative reduction
-reduced the total again to 17,150 nodes with all scores, moves, and PVs stable.
+reduced the total again to 17,150 nodes. Bounded history updates, failed-quiet
+maluses, and countermoves reduced it to 15,067 nodes while preserving all
+three scores and best moves.
 
 ## Next checkpoint
 
 Port the next measured GoChess search-behavior batch:
 
-1. Check/extensions, SEE capture ordering, killers, history bonuses/maluses,
-   and countermoves.
-2. Repetition semantics, adaptive time management, and opening book behavior.
+1. Repetition semantics and adaptive time management.
+2. Opening book behavior and the `OwnBook` UCI option.
 
 Re-run fixed-depth differential benchmarks after each coherent batch. Require
 an SPRT non-inferiority result before superiority experiments.

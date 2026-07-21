@@ -36,6 +36,7 @@ const FUTILITY_MARGIN: [i32; 3] = [0, 200, 500];
 const LMP_THRESHOLD: [usize; 6] = [0, 4, 6, 10, 15, 21];
 const LMR_FULL_MOVES: usize = 4;
 const LMR_MIN_DEPTH: u8 = 3;
+const HISTORY_MAX: i32 = 16_384;
 
 /// Reference logarithmic LMR formula. Inputs are clamped because reductions
 /// beyond the search's 64-ply horizon are never useful.
@@ -331,6 +332,10 @@ pub struct Engine {
     /// Two killer moves per ply: quiet moves that recently produced a cutoff at
     /// the same depth and are tried early elsewhere.
     killers: [[Move; 2]; 64],
+    /// The quiet reply that most recently refuted each preceding move.
+    counter_moves: [[Move; 64]; 64],
+    /// Moves on the current search line, used to find countermoves.
+    move_stack: [Move; 64],
     /// Stack of position hashes along the current line, for repetition detection.
     hashes: Vec<u64>,
     nodes: u64,
@@ -356,6 +361,8 @@ impl Engine {
             tt: TranspositionTable::with_mb(64),
             history: [[0; 64]; 64],
             killers: [[Move::default(); 2]; 64],
+            counter_moves: [[Move::default(); 64]; 64],
+            move_stack: [Move::default(); 64],
             hashes: Vec::new(),
             nodes: 0,
             start: Instant::now(),
@@ -528,6 +535,7 @@ impl Engine {
         let mut best = None;
         for (index, m) in moves.into_iter().enumerate() {
             self.hashes.push(b.hash);
+            self.move_stack[0] = m;
             let undo = b.make_move(m);
             let mut score = if index == 0 {
                 // Full-window search of the presumed best move.
@@ -730,6 +738,7 @@ impl Engine {
                 2
             };
             self.hashes.push(b.hash);
+            self.move_stack[ply as usize] = Move::default();
             let undo = b.make_null_move();
             let mut score = -self.negamax(
                 b,
@@ -782,6 +791,7 @@ impl Engine {
         let mut best_score = -INF;
         let can_futility_prune = !in_check && !node.pv && depth <= 2;
         let can_lmp = !in_check && !node.pv && depth <= 5;
+        let mut quiet_moves = Vec::with_capacity(moves.len());
         for (i, m) in moves.into_iter().enumerate() {
             let capture = b.piece_at(m.to).is_some() || m.en_passant;
             let quiet = !capture && m.promotion.is_none();
@@ -801,7 +811,11 @@ impl Engine {
             if can_lmp && legal_moves > LMP_THRESHOLD[depth as usize] && quiet {
                 continue;
             }
+            if quiet {
+                quiet_moves.push(m);
+            }
             self.hashes.push(b.hash);
+            self.move_stack[ply as usize] = m;
             let undo = b.make_move(m);
             // Logarithmic late-move reduction: search late quiets at reduced
             // depth with a null window. A result above alpha is verified at
@@ -905,10 +919,22 @@ impl Engine {
             // Reward the quiet move that caused it (history and killers) so it is
             // tried earlier in sibling nodes.
             if alpha >= beta {
-                if !capture && (ply as usize) < 64 {
-                    self.history[m.from as usize][m.to as usize] += (depth as i32).pow(2);
-                    self.killers[ply as usize][1] = self.killers[ply as usize][0];
-                    self.killers[ply as usize][0] = m
+                if quiet && (ply as usize) < 64 {
+                    if self.killers[ply as usize][0] != m {
+                        self.killers[ply as usize][1] = self.killers[ply as usize][0];
+                        self.killers[ply as usize][0] = m;
+                    }
+                    let bonus = i32::from(depth).pow(2);
+                    self.update_history(m, bonus);
+                    for failed in &quiet_moves[..quiet_moves.len() - 1] {
+                        self.update_history(*failed, -bonus);
+                    }
+                    if ply > 0 {
+                        let previous = self.move_stack[ply as usize - 1];
+                        if previous.from != previous.to {
+                            self.counter_moves[previous.from as usize][previous.to as usize] = m;
+                        }
+                    }
                 }
                 break;
             }
@@ -1005,24 +1031,49 @@ impl Engine {
     /// highest: winning/equal captures (by SEE), then losing captures, then
     /// promotions, then the two killer moves, and finally quiet moves by their
     /// history score.
+    fn update_history(&mut self, chess_move: Move, bonus: i32) {
+        let bonus = bonus.clamp(-HISTORY_MAX, HISTORY_MAX);
+        let history = &mut self.history[chess_move.from as usize][chess_move.to as usize];
+        *history += bonus - *history * bonus.abs() / HISTORY_MAX;
+    }
+
     fn order(&self, b: &Board, moves: &mut [Move], ply: usize) {
+        let counter_move = if ply > 0 && ply <= 64 {
+            let previous = self.move_stack[ply - 1];
+            self.counter_moves[previous.from as usize][previous.to as usize]
+        } else {
+            Move::default()
+        };
         moves.sort_unstable_by_key(|m| {
-            std::cmp::Reverse(if b.piece_at(m.to).is_some() || m.en_passant {
+            let capture = b.piece_at(m.to).is_some() || m.en_passant;
+            let mut score = if capture {
                 let see = static_exchange_eval(b, *m);
                 if see >= 0 {
                     100_000 + see
                 } else {
                     50_000 + see
                 }
-            } else if m.promotion.is_some() {
-                90_000
-            } else if ply < 64 && *m == self.killers[ply][0] {
-                80_000
-            } else if ply < 64 && *m == self.killers[ply][1] {
-                70_000
             } else {
-                self.history[m.from as usize][m.to as usize]
-            })
+                0
+            };
+            if let Some(promotion) = m.promotion {
+                score += 90_000 + piece_value(promotion);
+            }
+            if !capture && m.promotion.is_none() && ply < 64 {
+                score = if *m == self.killers[ply][0] {
+                    80_000
+                } else if *m == self.killers[ply][1] {
+                    79_000
+                } else if *m == counter_move && counter_move != Move::default() {
+                    78_000
+                } else {
+                    score
+                };
+            }
+            if score == 0 {
+                score = self.history[m.from as usize][m.to as usize];
+            }
+            std::cmp::Reverse(score)
         })
     }
     /// Reconstructs the principal variation by walking the transposition table:
@@ -1140,6 +1191,43 @@ fn score_from_tt(score: i32, ply: u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_updates_are_bounded_and_accept_maluses() {
+        let mut engine = Engine::new();
+        let chess_move = Move {
+            from: 12,
+            to: 28,
+            ..Move::default()
+        };
+        engine.update_history(chess_move, 100);
+        assert_eq!(engine.history[12][28], 100);
+        engine.update_history(chess_move, -100);
+        assert!(engine.history[12][28] < 100);
+        for _ in 0..1_000 {
+            engine.update_history(chess_move, HISTORY_MAX);
+        }
+        assert_eq!(engine.history[12][28], HISTORY_MAX);
+    }
+
+    #[test]
+    fn countermove_orders_a_quiet_move_before_history() {
+        let board = Board::startpos();
+        let previous = Move {
+            from: 52,
+            to: 36,
+            ..Move::default()
+        };
+        let counter = board.parse_move("c2c4").unwrap();
+        let history_move = board.parse_move("d2d4").unwrap();
+        let mut engine = Engine::new();
+        engine.move_stack[0] = previous;
+        engine.counter_moves[previous.from as usize][previous.to as usize] = counter;
+        engine.history[history_move.from as usize][history_move.to as usize] = HISTORY_MAX;
+        let mut moves = [history_move, counter];
+        engine.order(&board, &mut moves, 1);
+        assert_eq!(moves[0], counter);
+    }
 
     #[test]
     fn logarithmic_lmr_matches_reference_points() {
