@@ -73,6 +73,8 @@ Implemented public interfaces and behavior include:
   guards plus exact null-state restoration.
 - Razoring through depth 3, shallow quiet-move futility pruning, and late-move
   pruning through depth 5 with reference margins and thresholds.
+- Logarithmic late-move reductions with full-depth verification and internal
+  iterative reduction at deep PV nodes without a transposition-table move.
 
 At the current worktree checkpoint, all 17 Rust tests, warning-free Clippy,
 release builds, GoChess tests, and UCI smoke tests passed.
@@ -111,16 +113,16 @@ evaluation caching and aspiration/PVS reduced that to 47,195 nodes; null-move
 and reverse futility pruning reduced it again to 39,436 nodes. Razoring,
 futility pruning, and late-move pruning reduced the total to 17,967 nodes and
 matched GoChess's `f3e5` middlegame best move while preserving the other two
-best moves.
+best moves. Logarithmic late-move reductions and internal iterative reduction
+reduced the total again to 17,150 nodes with all scores, moves, and PVs stable.
 
 ## Next checkpoint
 
 Port the next measured GoChess search-behavior batch:
 
-1. Logarithmic late-move reductions and internal iterative reductions.
-2. Check/extensions, SEE capture ordering, killers, history bonuses/maluses,
+1. Check/extensions, SEE capture ordering, killers, history bonuses/maluses,
    and countermoves.
-3. Repetition semantics, adaptive time management, and opening book behavior.
+2. Repetition semantics, adaptive time management, and opening book behavior.
 
 Re-run fixed-depth differential benchmarks after each coherent batch. Require
 an SPRT non-inferiority result before superiority experiments.

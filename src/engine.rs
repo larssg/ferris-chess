@@ -34,6 +34,17 @@ const FUTILITY_MARGIN: [i32; 3] = [0, 200, 500];
 /// Number of legal moves searched before late quiet moves may be discarded,
 /// indexed by remaining depth.
 const LMP_THRESHOLD: [usize; 6] = [0, 4, 6, 10, 15, 21];
+const LMR_FULL_MOVES: usize = 4;
+const LMR_MIN_DEPTH: u8 = 3;
+
+/// Reference logarithmic LMR formula. Inputs are clamped because reductions
+/// beyond the search's 64-ply horizon are never useful.
+fn lmr_reduction(depth: u8, move_count: usize, pv: bool) -> u8 {
+    let depth = depth.min(63);
+    let move_count = move_count.min(63);
+    let base = (0.75 + f64::from(depth).ln() * (move_count as f64).ln() / 2.25) as i32;
+    (base - i32::from(pv)).max(1).min(i32::from(depth) - 1) as u8
+}
 /// The stopping conditions for a search, mirroring the UCI `go` parameters. A
 /// search ends when any active limit is reached; the clock fields feed the time
 /// budget computed by the UCI adapter, and `root_moves` restricts the search to
@@ -656,7 +667,7 @@ impl Engine {
         // Check extension: search one ply deeper when in check, since forcing
         // lines resolve slowly and are cheap (few legal replies).
         let in_check = b.in_check(b.side);
-        let depth = depth.saturating_add(in_check as u8);
+        let mut depth = depth.saturating_add(in_check as u8);
         let original = alpha;
         // Transposition-table cutoff: a stored result searched at least as deep
         // as needed can end this node outright when its bound is conclusive.
@@ -744,6 +755,13 @@ impl Engine {
                 return score;
             }
         }
+        // Internal iterative reduction: a deep PV node without a TT move has
+        // poor ordering information, so spend one less ply instead of paying
+        // for a separate internal iterative-deepening search.
+        let missing_tt_move = tt.is_none_or(|entry| entry.best == Move::default());
+        if node.pv && depth >= 4 && missing_tt_move {
+            depth -= 1;
+        }
         // No legal moves: checkmate (scored by ply, so faster mates win) or
         // stalemate (a draw).
         let mut moves = b.legal_moves();
@@ -785,27 +803,80 @@ impl Engine {
             }
             self.hashes.push(b.hash);
             let undo = b.make_move(m);
-            // Late-move reduction: quiet moves ordered late in a non-PV node are
-            // searched one ply shallower first, on the bet that they will fail low.
-            let reduction = if depth >= 3 && i >= 4 && !node.pv && !capture && !in_check {
-                1
+            // Logarithmic late-move reduction: search late quiets at reduced
+            // depth with a null window. A result above alpha is verified at
+            // full depth before a PV node widens to its full window.
+            let reduction =
+                if legal_moves > LMR_FULL_MOVES && depth >= LMR_MIN_DEPTH && quiet && !in_check {
+                    lmr_reduction(depth, legal_moves, node.pv)
+                } else {
+                    0
+                };
+            let mut score;
+            if reduction > 0 {
+                score = -self.negamax(
+                    b,
+                    depth - 1 - reduction,
+                    -alpha - 1,
+                    -alpha,
+                    ply + 1,
+                    NodeState {
+                        pv: false,
+                        allow_null: true,
+                    },
+                );
+                if score > alpha {
+                    score = -self.negamax(
+                        b,
+                        depth - 1,
+                        -alpha - 1,
+                        -alpha,
+                        ply + 1,
+                        NodeState {
+                            pv: false,
+                            allow_null: true,
+                        },
+                    );
+                    if score > alpha && node.pv {
+                        score = -self.negamax(
+                            b,
+                            depth - 1,
+                            -beta,
+                            -alpha,
+                            ply + 1,
+                            NodeState {
+                                pv: true,
+                                allow_null: true,
+                            },
+                        );
+                    }
+                }
+            } else if !node.pv || i > 0 {
+                score = -self.negamax(
+                    b,
+                    depth - 1,
+                    -alpha - 1,
+                    -alpha,
+                    ply + 1,
+                    NodeState {
+                        pv: false,
+                        allow_null: true,
+                    },
+                );
+                if score > alpha && score < beta {
+                    score = -self.negamax(
+                        b,
+                        depth - 1,
+                        -beta,
+                        -alpha,
+                        ply + 1,
+                        NodeState {
+                            pv: node.pv,
+                            allow_null: true,
+                        },
+                    );
+                }
             } else {
-                0
-            };
-            let mut score = -self.negamax(
-                b,
-                depth - 1 - reduction,
-                -alpha - 1,
-                -alpha,
-                ply + 1,
-                NodeState {
-                    pv: false,
-                    allow_null: true,
-                },
-            );
-            // Re-search at full depth/window if a reduced or scout search beat
-            // alpha, since its result may have been an underestimate.
-            if score > alpha && (reduction > 0 || node.pv) {
                 score = -self.negamax(
                     b,
                     depth - 1,
@@ -816,7 +887,7 @@ impl Engine {
                         pv: node.pv,
                         allow_null: true,
                     },
-                )
+                );
             }
             b.unmake_move(m, undo);
             self.hashes.pop();
@@ -1069,6 +1140,15 @@ fn score_from_tt(score: i32, ply: u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logarithmic_lmr_matches_reference_points() {
+        assert_eq!(lmr_reduction(3, 5, false), 1);
+        assert_eq!(lmr_reduction(10, 20, false), 3);
+        assert_eq!(lmr_reduction(10, 20, true), 2);
+        assert_eq!(lmr_reduction(63, 63, false), 8);
+        assert_eq!(lmr_reduction(63, 63, true), 7);
+    }
     use crate::Color;
 
     #[test]

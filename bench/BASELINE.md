@@ -76,3 +76,20 @@ produced this release depth-4 benchmark:
 
 The run completed in 98 ms at 402,408 NPS. Nodes fell about 16.4% from the TT
 evaluation cache/PVS checkpoint with scores, best moves, and PVs unchanged.
+
+## Shallow pruning and LMR checkpoint
+
+Razoring, futility pruning, and late-move pruning first reduced the release
+depth-4 total to 17,967 nodes. Adding reference-style logarithmic late-move
+reductions and internal iterative reduction produced:
+
+| Position | Nodes | Score | Best move |
+|---|---:|---:|---|
+| Start position | 1,449 | 0 | `g1f3` |
+| Kiwipete | 9,516 | 45 | `e2a6` |
+| Middlegame | 6,185 | 34 | `f3e5` |
+| Total | 17,150 | — | — |
+
+The final LMR/IIR step reduced nodes by 4.5% with all depth-4 scores, best
+moves, and PVs unchanged. Relative to the null-move/reverse-futility checkpoint,
+the combined shallow-pruning and reduction work cut the node count by 56.5%.
