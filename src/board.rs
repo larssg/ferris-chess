@@ -483,207 +483,171 @@ impl Board {
     /// Generates pseudo-legal moves for the side to move — moves that respect
     /// each piece's movement but may leave the king in check. When
     /// `captures_only` is set (quiescence search), quiet moves are skipped, but
-    /// promotions are always emitted because they change material.
+    /// capture-promotions are always emitted because they change material.
+    ///
+    /// Everything is driven by the occupancy bitboards and the precomputed
+    /// target/ray tables; the mailbox is read once per piece for its kind. The
+    /// emission order deliberately reproduces the original square-by-square
+    /// scan (pieces by ascending square, targets in fixed offset/ray order),
+    /// because downstream tie-breaks turn generation order into search-visible
+    /// behavior.
     fn generate_pseudo_moves(&self, out: &mut Vec<Move>, captures_only: bool) {
-        for from in 0..64u8 {
-            let Some(piece) = self.squares[from as usize] else {
-                continue;
-            };
-            if piece.color != self.side {
-                continue;
-            }
-            let f = (from % 8) as i8;
-            let r = (from / 8) as i8;
-            // Records a candidate move, rejecting self-captures and — in
-            // captures-only mode — quiet non-promotion moves.
-            let mut add = |to: u8, promotion: Option<PieceKind>, ep: bool, castle: bool| {
-                let target = self.squares[to as usize];
-                if target.map(|p| p.color) == Some(piece.color) {
-                    return;
-                }
-                if !captures_only || target.is_some() || ep || promotion.is_some() {
-                    out.push(Move {
-                        from,
-                        to,
-                        promotion,
-                        en_passant: ep,
-                        castle,
-                    })
-                }
-            };
+        let own = self.occupancy[color_index(self.side)];
+        let enemy = self.occupancy[color_index(self.side.other())];
+        let occupied = own | enemy;
+        for from in bit_squares(own) {
+            let piece = self.squares[from as usize].expect("occupancy bit implies a piece");
             match piece.kind {
                 PieceKind::Pawn => {
+                    let f = (from % 8) as i8;
+                    let r = (from / 8) as i8;
                     // Direction of travel and the ranks where a pawn may still
                     // double-step (`start`) or promote (`last`).
-                    let d = if piece.color == Color::White { 1 } else { -1 };
-                    let start = if piece.color == Color::White { 1 } else { 6 };
-                    let last = if piece.color == Color::White { 7 } else { 0 };
+                    let (d, start, last) = if piece.color == Color::White {
+                        (1, 1, 7)
+                    } else {
+                        (-1, 6, 0)
+                    };
+                    // A FEN can place a pawn on its own last rank; skip it
+                    // rather than step off the board.
                     let nr = r + d;
-                    if (0..8).contains(&nr) {
-                        // Single (and double) push onto an empty square.
-                        let forward = (nr * 8 + f) as u8;
-                        if !captures_only && self.squares[forward as usize].is_none() {
+                    if !(0..8).contains(&nr) {
+                        continue;
+                    }
+                    // Single (and double) push onto an empty square.
+                    let forward = (nr * 8 + f) as u8;
+                    if !captures_only && occupied & (1u64 << forward) == 0 {
+                        if nr == last {
+                            // Reaching the last rank fans out into the four
+                            // promotion choices.
+                            for p in [
+                                PieceKind::Queen,
+                                PieceKind::Rook,
+                                PieceKind::Bishop,
+                                PieceKind::Knight,
+                            ] {
+                                out.push(Move {
+                                    from,
+                                    to: forward,
+                                    promotion: Some(p),
+                                    ..Move::default()
+                                })
+                            }
+                        } else {
+                            out.push(Move {
+                                from,
+                                to: forward,
+                                ..Move::default()
+                            });
+                            // From the starting rank, a two-square push is
+                            // allowed if the intervening square is also empty.
+                            if r == start {
+                                let two = ((r + 2 * d) * 8 + f) as u8;
+                                if occupied & (1u64 << two) == 0 {
+                                    out.push(Move {
+                                        from,
+                                        to: two,
+                                        ..Move::default()
+                                    })
+                                }
+                            }
+                        }
+                    }
+                    // Diagonal captures, including en passant onto the
+                    // recorded target square.
+                    for df in [-1, 1] {
+                        let nf = f + df;
+                        if !(0..8).contains(&nf) {
+                            continue;
+                        }
+                        let to = (nr * 8 + nf) as u8;
+                        let is_en_passant = self.en_passant == Some(to);
+                        if enemy & (1u64 << to) != 0 || is_en_passant {
                             if nr == last {
-                                // Reaching the last rank fans out into the four
-                                // promotion choices.
                                 for p in [
                                     PieceKind::Queen,
                                     PieceKind::Rook,
                                     PieceKind::Bishop,
                                     PieceKind::Knight,
                                 ] {
-                                    add(forward, Some(p), false, false)
+                                    out.push(Move {
+                                        from,
+                                        to,
+                                        promotion: Some(p),
+                                        ..Move::default()
+                                    })
                                 }
                             } else {
-                                add(forward, None, false, false);
-                                // From the starting rank, a two-square push is
-                                // allowed if the intervening square is also empty.
-                                if r == start {
-                                    let two = ((r + 2 * d) * 8 + f) as u8;
-                                    if self.squares[two as usize].is_none() {
-                                        add(two, None, false, false)
-                                    }
-                                }
-                            }
-                        }
-                        // Diagonal captures, including en passant onto the
-                        // recorded target square.
-                        for df in [-1, 1] {
-                            let nf = f + df;
-                            if !(0..8).contains(&nf) {
-                                continue;
-                            }
-                            let to = (nr * 8 + nf) as u8;
-                            if self.squares[to as usize]
-                                .map(|p| p.color == piece.color.other())
-                                .unwrap_or(false)
-                                || self.en_passant == Some(to)
-                            {
-                                if nr == last {
-                                    for p in [
-                                        PieceKind::Queen,
-                                        PieceKind::Rook,
-                                        PieceKind::Bishop,
-                                        PieceKind::Knight,
-                                    ] {
-                                        add(to, Some(p), false, false)
-                                    }
-                                } else {
-                                    add(to, None, self.en_passant == Some(to), false)
-                                }
+                                out.push(Move {
+                                    from,
+                                    to,
+                                    en_passant: is_en_passant,
+                                    ..Move::default()
+                                })
                             }
                         }
                     }
                 }
                 PieceKind::Knight => {
-                    // The eight L-shaped jumps; `offset` drops any that leave the board.
-                    for (df, dr) in [
-                        (-2, -1),
-                        (-2, 1),
-                        (-1, -2),
-                        (-1, 2),
-                        (1, -2),
-                        (1, 2),
-                        (2, -1),
-                        (2, 1),
-                    ] {
-                        if let Some(to) = offset(f, r, df, dr) {
-                            add(to, None, false, false)
-                        }
-                    }
+                    leaper_moves(out, from, &KNIGHT_TARGETS, own, enemy, captures_only)
                 }
-                // Sliders share `slide`, differing only in their ray directions.
-                PieceKind::Bishop => slide(
-                    self,
-                    out,
-                    from,
-                    piece,
-                    &[(1, 1), (1, -1), (-1, 1), (-1, -1)],
-                    captures_only,
-                ),
-                PieceKind::Rook => slide(
-                    self,
-                    out,
-                    from,
-                    piece,
-                    &[(1, 0), (-1, 0), (0, 1), (0, -1)],
-                    captures_only,
-                ),
-                PieceKind::Queen => slide(
-                    self,
-                    out,
-                    from,
-                    piece,
-                    &[
-                        (1, 0),
-                        (-1, 0),
-                        (0, 1),
-                        (0, -1),
-                        (1, 1),
-                        (1, -1),
-                        (-1, 1),
-                        (-1, -1),
-                    ],
-                    captures_only,
-                ),
+                PieceKind::Bishop => {
+                    slider_moves(out, from, &BISHOP_MOVE_RAYS, own, occupied, captures_only)
+                }
+                PieceKind::Rook => {
+                    slider_moves(out, from, &ROOK_MOVE_RAYS, own, occupied, captures_only)
+                }
+                PieceKind::Queen => {
+                    slider_moves(out, from, &QUEEN_MOVE_RAYS, own, occupied, captures_only)
+                }
                 PieceKind::King => {
-                    // One step in each of the eight directions.
-                    for (df, dr) in [
-                        (-1, -1),
-                        (-1, 0),
-                        (-1, 1),
-                        (0, -1),
-                        (0, 1),
-                        (1, -1),
-                        (1, 0),
-                        (1, 1),
-                    ] {
-                        if let Some(to) = offset(f, r, df, dr) {
-                            add(to, None, false, false)
-                        }
-                    }
+                    leaper_moves(out, from, &KING_TARGETS, own, enemy, captures_only);
                     if !captures_only {
                         // Castling: pick this color's home rank, the enemy color
                         // that would attack through squares, and the king/queen
                         // side rights bits.
-                        let (rank, enemy, ks, qs) = if piece.color == Color::White {
+                        let (rank, enemy_color, ks, qs) = if piece.color == Color::White {
                             (0, Color::Black, 1, 2)
                         } else {
                             (7, Color::White, 4, 8)
                         };
                         let base = rank * 8;
+                        let rooks = self.pieces(piece.color, PieceKind::Rook);
+                        let empty = |square: u8| occupied & (1u64 << square) == 0;
                         // The king must be on its home square and not currently in
                         // check; the squares it passes through are checked below.
-                        if from == base + 4 && !self.square_attacked(from, enemy) {
+                        if from == base + 4 && !self.square_attacked(from, enemy_color) {
                             // Kingside: f- and g-file empty and unattacked, rook present.
                             if self.castling & ks != 0
-                                && self.squares[base as usize + 5].is_none()
-                                && self.squares[base as usize + 6].is_none()
-                                && !self.square_attacked(base + 5, enemy)
-                                && !self.square_attacked(base + 6, enemy)
-                                && self.squares[base as usize + 7]
-                                    == Some(Piece {
-                                        color: piece.color,
-                                        kind: PieceKind::Rook,
-                                    })
+                                && empty(base + 5)
+                                && empty(base + 6)
+                                && !self.square_attacked(base + 5, enemy_color)
+                                && !self.square_attacked(base + 6, enemy_color)
+                                && rooks & (1u64 << (base + 7)) != 0
                             {
-                                add(base + 6, None, false, true)
+                                out.push(Move {
+                                    from,
+                                    to: base + 6,
+                                    castle: true,
+                                    ..Move::default()
+                                })
                             }
                             // Queenside: b-, c-, d-file empty; c- and d-file
                             // unattacked (the king does not pass over b); rook present.
                             if self.castling & qs != 0
-                                && self.squares[base as usize + 1].is_none()
-                                && self.squares[base as usize + 2].is_none()
-                                && self.squares[base as usize + 3].is_none()
-                                && !self.square_attacked(base + 3, enemy)
-                                && !self.square_attacked(base + 2, enemy)
-                                && self.squares[base as usize]
-                                    == Some(Piece {
-                                        color: piece.color,
-                                        kind: PieceKind::Rook,
-                                    })
+                                && empty(base + 1)
+                                && empty(base + 2)
+                                && empty(base + 3)
+                                && !self.square_attacked(base + 3, enemy_color)
+                                && !self.square_attacked(base + 2, enemy_color)
+                                && rooks & (1u64 << base) != 0
                             {
-                                add(base + 2, None, false, true)
+                                out.push(Move {
+                                    from,
+                                    to: base + 2,
+                                    castle: true,
+                                    ..Move::default()
+                                })
                             }
                         }
                     }
@@ -1002,15 +966,22 @@ impl FromStr for Board {
         Self::from_fen(s)
     }
 }
-/// Adds `(df, dr)` to file/rank `(f, r)` and returns the resulting square, or
-/// `None` if it steps off the board. The bounds check is what makes the
-/// per-piece offset tables above safe to apply blindly.
-fn offset(f: i8, r: i8, df: i8, dr: i8) -> Option<u8> {
-    let (nf, nr) = (f + df, r + dr);
-    ((0..8).contains(&nf) && (0..8).contains(&nr)).then_some((nr * 8 + nf) as u8)
+/// Iterates the set squares of a bitboard from a1 toward h8.
+pub(crate) fn bit_squares(mut bits: u64) -> impl Iterator<Item = u8> {
+    std::iter::from_fn(move || {
+        if bits == 0 {
+            return None;
+        }
+        let square = bits.trailing_zeros() as u8;
+        bits &= bits - 1;
+        Some(square)
+    })
 }
 
-pub(crate) const KNIGHT_ATTACKS: [u64; 64] = attack_table(&[
+/// The knight's and king's step offsets. Their order fixes the order moves are
+/// emitted in, which downstream tie-breaks (unstable sorts on equal ordering
+/// scores) turn into search-visible behavior — so it must not change.
+const KNIGHT_OFFSETS: [(i8, i8); 8] = [
     (-2, -1),
     (-2, 1),
     (-1, -2),
@@ -1019,8 +990,8 @@ pub(crate) const KNIGHT_ATTACKS: [u64; 64] = attack_table(&[
     (1, 2),
     (2, -1),
     (2, 1),
-]);
-pub(crate) const KING_ATTACKS: [u64; 64] = attack_table(&[
+];
+const KING_OFFSETS: [(i8, i8); 8] = [
     (-1, -1),
     (-1, 0),
     (-1, 1),
@@ -1029,7 +1000,40 @@ pub(crate) const KING_ATTACKS: [u64; 64] = attack_table(&[
     (1, -1),
     (1, 0),
     (1, 1),
-]);
+];
+
+pub(crate) const KNIGHT_ATTACKS: [u64; 64] = attack_table(&KNIGHT_OFFSETS);
+pub(crate) const KING_ATTACKS: [u64; 64] = attack_table(&KING_OFFSETS);
+
+/// Per-square target lists for the leapers, in offset order, padded with the
+/// `NO_TARGET` sentinel. Move generation walks these instead of re-deriving
+/// file/rank arithmetic and bounds checks for every move.
+const NO_TARGET: u8 = 64;
+const KNIGHT_TARGETS: [[u8; 8]; 64] = target_table(&KNIGHT_OFFSETS);
+const KING_TARGETS: [[u8; 8]; 64] = target_table(&KING_OFFSETS);
+
+/// Builds per-square on-board target squares in offset order at compile time.
+const fn target_table(offsets: &[(i8, i8)]) -> [[u8; 8]; 64] {
+    let mut table = [[NO_TARGET; 8]; 64];
+    let mut square = 0;
+    while square < 64 {
+        let file = (square % 8) as i8;
+        let rank = (square / 8) as i8;
+        let mut count = 0;
+        let mut index = 0;
+        while index < offsets.len() {
+            let target_file = file + offsets[index].0;
+            let target_rank = rank + offsets[index].1;
+            if target_file >= 0 && target_file < 8 && target_rank >= 0 && target_rank < 8 {
+                table[square][count] = (target_rank * 8 + target_file) as u8;
+                count += 1;
+            }
+            index += 1;
+        }
+        square += 1;
+    }
+    table
+}
 
 /// Squares holding a pawn of the named color that would attack the indexed
 /// square: white pawns attack from one rank below, black pawns from one above.
@@ -1099,45 +1103,50 @@ const RAY_NORTH_WEST: [u64; 64] = ray_table(-1, 1);
 const RAY_SOUTH_EAST: [u64; 64] = ray_table(1, -1);
 const RAY_SOUTH_WEST: [u64; 64] = ray_table(-1, -1);
 
-/// Bishop and rook directions. The order matters to static exchange
-/// evaluation, which probes rays one by one and keeps the first attacker it
-/// finds: it matches the reference's scan order so exchange sequences — and
-/// therefore search node counts — stay reproducible.
-pub(crate) const DIAGONAL_RAYS: [Ray; 4] = [
-    Ray {
-        table: &RAY_SOUTH_WEST,
-        ascending: false,
-    },
-    Ray {
-        table: &RAY_NORTH_WEST,
-        ascending: true,
-    },
-    Ray {
-        table: &RAY_SOUTH_EAST,
-        ascending: false,
-    },
-    Ray {
-        table: &RAY_NORTH_EAST,
-        ascending: true,
-    },
-];
-pub(crate) const ORTHOGONAL_RAYS: [Ray; 4] = [
-    Ray {
-        table: &RAY_WEST,
-        ascending: false,
-    },
-    Ray {
-        table: &RAY_EAST,
-        ascending: true,
-    },
-    Ray {
-        table: &RAY_SOUTH,
-        ascending: false,
-    },
-    Ray {
-        table: &RAY_NORTH,
-        ascending: true,
-    },
+const NORTH: Ray = Ray {
+    table: &RAY_NORTH,
+    ascending: true,
+};
+const SOUTH: Ray = Ray {
+    table: &RAY_SOUTH,
+    ascending: false,
+};
+const EAST: Ray = Ray {
+    table: &RAY_EAST,
+    ascending: true,
+};
+const WEST: Ray = Ray {
+    table: &RAY_WEST,
+    ascending: false,
+};
+const NORTH_EAST: Ray = Ray {
+    table: &RAY_NORTH_EAST,
+    ascending: true,
+};
+const NORTH_WEST: Ray = Ray {
+    table: &RAY_NORTH_WEST,
+    ascending: true,
+};
+const SOUTH_EAST: Ray = Ray {
+    table: &RAY_SOUTH_EAST,
+    ascending: false,
+};
+const SOUTH_WEST: Ray = Ray {
+    table: &RAY_SOUTH_WEST,
+    ascending: false,
+};
+
+/// Bishop and rook directions in two fixed orders. Static exchange evaluation
+/// probes rays one by one and keeps the first attacker it finds; move
+/// generation emits each ray's moves in sequence. Both orders match the
+/// historical square-by-square scans so exchange sequences and move lists —
+/// and therefore search node counts — stay reproducible.
+pub(crate) const DIAGONAL_RAYS: [Ray; 4] = [SOUTH_WEST, NORTH_WEST, SOUTH_EAST, NORTH_EAST];
+pub(crate) const ORTHOGONAL_RAYS: [Ray; 4] = [WEST, EAST, SOUTH, NORTH];
+const BISHOP_MOVE_RAYS: [Ray; 4] = [NORTH_EAST, SOUTH_EAST, NORTH_WEST, SOUTH_WEST];
+const ROOK_MOVE_RAYS: [Ray; 4] = [EAST, WEST, NORTH, SOUTH];
+const QUEEN_MOVE_RAYS: [Ray; 8] = [
+    EAST, WEST, NORTH, SOUTH, NORTH_EAST, SOUTH_EAST, NORTH_WEST, SOUTH_WEST,
 ];
 
 /// Builds one direction's ray masks at compile time.
@@ -1174,45 +1183,63 @@ pub(crate) fn bishop_attacks(sq: u8, occupied: u64) -> u64 {
         | ne.attacks(sq, occupied)
 }
 
-/// Emits sliding moves for a bishop/rook/queen: walk each direction until the
-/// edge, adding quiet moves onto empty squares and a capture onto the first
-/// enemy piece, then stop that ray.
-fn slide(
-    b: &Board,
+/// Emits knight or king steps from the precomputed target list, skipping own
+/// pieces and — in captures-only mode — empty squares. The list's offset order
+/// is preserved verbatim.
+fn leaper_moves(
     out: &mut Vec<Move>,
     from: u8,
-    p: Piece,
-    dirs: &[(i8, i8)],
+    targets: &[[u8; 8]; 64],
+    own: u64,
+    enemy: u64,
     captures_only: bool,
 ) {
-    let (f, r) = ((from % 8) as i8, (from / 8) as i8);
-    for &(df, dr) in dirs {
-        let (mut nf, mut nr) = (f + df, r + dr);
-        while (0..8).contains(&nf) && (0..8).contains(&nr) {
-            let to = (nr * 8 + nf) as u8;
-            match b.squares[to as usize] {
-                None => {
-                    if !captures_only {
-                        out.push(Move {
-                            from,
-                            to,
-                            ..Move::default()
-                        })
-                    }
-                }
-                Some(q) => {
-                    if q.color != p.color {
-                        out.push(Move {
-                            from,
-                            to,
-                            ..Move::default()
-                        })
-                    }
-                    break;
-                }
-            }
-            nf += df;
-            nr += dr
+    for &to in &targets[from as usize] {
+        if to == NO_TARGET {
+            break;
+        }
+        let bit = 1u64 << to;
+        if own & bit != 0 || (captures_only && enemy & bit == 0) {
+            continue;
+        }
+        out.push(Move {
+            from,
+            to,
+            ..Move::default()
+        })
+    }
+}
+
+/// Emits sliding moves for a bishop/rook/queen: each ray, cut at its first
+/// blocker by the precomputed tables, yields quiet moves and a capture of an
+/// enemy blocker. Iterating each ray's bits in its direction of travel
+/// reproduces the near-to-far order of the original square-by-square walk.
+fn slider_moves(
+    out: &mut Vec<Move>,
+    from: u8,
+    rays: &[Ray],
+    own: u64,
+    occupied: u64,
+    captures_only: bool,
+) {
+    let enemy = occupied & !own;
+    for ray in rays {
+        let mut reachable = ray.attacks(from, occupied) & !own;
+        if captures_only {
+            reachable &= enemy;
+        }
+        while reachable != 0 {
+            let to = if ray.ascending {
+                reachable.trailing_zeros() as u8
+            } else {
+                (63 - reachable.leading_zeros()) as u8
+            };
+            reachable &= !(1u64 << to);
+            out.push(Move {
+                from,
+                to,
+                ..Move::default()
+            })
         }
     }
 }

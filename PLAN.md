@@ -179,6 +179,15 @@ most remaining pawn-term work. Depth 9 fell to 269--284 ms (up to roughly
 The profile now ranks `make_move`, mailbox `generate_pseudo_moves`,
 `square_attacked` legality filtering, and slider move emission as the largest
 remaining costs.
+Move generation then moved onto the bitboards: occupancy bits drive the piece
+scan, compile-time target lists serve the leapers, and the slider rays reuse
+the blocker-cut ray tables, iterated in each ray's direction of travel. The
+emission order deliberately reproduces the old square-by-square scan, because
+unstable sorts turn generation order into search-visible behavior; identity
+was verified by diffing old-versus-new deterministic outputs for depth-11
+search (1,831,720 nodes), all 24 BK positions at depth 6, and all 300 WAC
+positions at depth 5. Depth 9 fell to 233--248 ms (up to roughly 2.21M NPS)
+with perft exact.
 
 ## Next checkpoint
 

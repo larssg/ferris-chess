@@ -8,6 +8,7 @@
 //! This module also hosts [`static_exchange_eval`] (SEE), which the search uses
 //! to score captures without playing them out on the board.
 
+use crate::board::bit_squares;
 use crate::{Board, Color, Move, PieceKind, board};
 
 // Piece values in centipawns (pawn..king). The king's nominal 20,000 keeps it
@@ -335,18 +336,6 @@ const fn ranks_below(rank: u8) -> u64 {
     } else {
         (1u64 << (rank * 8)) - 1
     }
-}
-
-/// Iterates the set squares of a bitboard from a1 toward h8.
-fn bit_squares(mut bits: u64) -> impl Iterator<Item = u8> {
-    std::iter::from_fn(move || {
-        if bits == 0 {
-            return None;
-        }
-        let square = bits.trailing_zeros() as u8;
-        bits &= bits - 1;
-        Some(square)
-    })
 }
 
 /// Scores the safety of `color`'s king (White-positive): a bonus per adjacent
