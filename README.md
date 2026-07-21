@@ -13,6 +13,8 @@ complete legal chess core and classical alpha-beta search.
 - Zobrist-style deterministic position keys, repetition and rule-draw detection
 - Transposition table and UCI-configurable hash allocation
 - UCI `depth`, `movetime`, `nodes`, and clock/increment time controls
+- Asynchronous UCI search with responsive `stop`, `ponder`, and `ponderhit`
+- Thread-safe library search cancellation through `SearchHandle`
 - Material, piece-square, and bishop-pair evaluation
 
 ## Build and run

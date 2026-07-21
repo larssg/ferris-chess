@@ -1,15 +1,42 @@
-use chess::{Board, Color, Engine, SearchLimits};
+use chess::{Board, Color, Engine, SearchHandle, SearchLimits};
 use std::{
     io::{self, BufRead},
+    thread::{self, JoinHandle},
     time::Duration,
 };
+
+struct RunningSearch {
+    control: SearchHandle,
+    worker: JoinHandle<Engine>,
+}
+
+fn stop_search(running: &mut Option<RunningSearch>, engine: &mut Option<Engine>) {
+    if let Some(search) = running.take() {
+        search.control.stop();
+        if let Ok(returned) = search.worker.join() {
+            *engine = Some(returned);
+        }
+    }
+}
+
 fn main() {
     let mut board = Board::startpos();
-    let mut engine = Engine::new();
+    let mut engine = Some(Engine::new());
+    let mut running: Option<RunningSearch> = None;
     let stdin = io::stdin();
     for line in stdin.lock().lines().map_while(Result::ok) {
         let parts: Vec<_> = line.split_whitespace().collect();
         if parts.is_empty() {
+            continue;
+        }
+        if parts[0] == "stop" {
+            stop_search(&mut running, &mut engine);
+            continue;
+        }
+        if parts[0] == "ponderhit" {
+            if let Some(search) = &running {
+                search.control.ponderhit();
+            }
             continue;
         }
         match parts[0] {
@@ -18,10 +45,12 @@ fn main() {
             ),
             "isready" => println!("readyok"),
             "ucinewgame" => {
+                stop_search(&mut running, &mut engine);
                 board = Board::startpos();
-                engine.clear()
+                engine.as_mut().unwrap().clear()
             }
             "setoption" => {
+                stop_search(&mut running, &mut engine);
                 if let (Some(name), Some(value)) = (
                     parts.iter().position(|p| *p == "name"),
                     parts.iter().position(|p| *p == "value"),
@@ -30,10 +59,11 @@ fn main() {
                     .is_some_and(|p| p.eq_ignore_ascii_case("hash"))
                     && let Some(mb) = parts.get(value + 1).and_then(|v| v.parse::<usize>().ok())
                 {
-                    engine.set_hash_mb(mb.clamp(1, 4096));
+                    engine.as_mut().unwrap().set_hash_mb(mb.clamp(1, 4096));
                 }
             }
             "position" => {
+                stop_search(&mut running, &mut engine);
                 let mut i = 1;
                 if parts.get(i) == Some(&"startpos") {
                     board = Board::startpos();
@@ -58,6 +88,7 @@ fn main() {
                 }
             }
             "go" => {
+                stop_search(&mut running, &mut engine);
                 let mut limits = SearchLimits::default();
                 let mut wtime: Option<u64> = None;
                 let mut btime: Option<u64> = None;
@@ -161,30 +192,49 @@ fn main() {
                 limits.white_increment = Duration::from_millis(winc);
                 limits.black_increment = Duration::from_millis(binc);
                 limits.moves_to_go = Some(moves_to_go as u32);
-                let r = engine.search(&board, limits, |r| {
+                let control = SearchHandle::new(limits.ponder);
+                let worker_control = control.clone();
+                let search_board = board.clone();
+                let mut search_engine = engine.take().unwrap();
+                let worker = thread::spawn(move || {
+                    let result = search_engine.search_with_handle(
+                        &search_board,
+                        limits,
+                        worker_control,
+                        |result| {
+                            println!(
+                                "info depth {} seldepth {} score cp {} nodes {} time {} nps {} hashfull {} pv {}",
+                                result.depth,
+                                result.seldepth,
+                                result.score,
+                                result.nodes,
+                                result.elapsed.as_millis(),
+                                result.nps,
+                                result.hashfull,
+                                result
+                                    .pv
+                                    .iter()
+                                    .map(ToString::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            )
+                        },
+                    );
                     println!(
-                        "info depth {} seldepth {} score cp {} nodes {} time {} nps {} hashfull {} pv {}",
-                        r.depth,
-                        r.seldepth,
-                        r.score,
-                        r.nodes,
-                        r.elapsed.as_millis(),
-                        r.nps,
-                        r.hashfull,
-                        r.pv.iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
+                        "bestmove {}",
+                        result.best_move.map_or("0000".into(), |m| m.to_string())
+                    );
+                    search_engine
                 });
-                println!(
-                    "bestmove {}",
-                    r.best_move.map_or("0000".into(), |m| m.to_string())
-                )
+                running = Some(RunningSearch { control, worker });
             }
             "d" => println!("{}", board.to_fen()),
-            "quit" => break,
+            "quit" => {
+                stop_search(&mut running, &mut engine);
+                break;
+            }
             _ => {}
         }
     }
+    stop_search(&mut running, &mut engine);
 }

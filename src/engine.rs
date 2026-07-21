@@ -1,5 +1,11 @@
 use crate::{Board, Color, Move, PieceKind};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 const INF: i32 = 100_000;
 const MATE: i32 = 90_000;
 #[derive(Clone, Debug)]
@@ -48,6 +54,34 @@ pub enum TerminationReason {
     Nodes,
     Mate,
     NoLegalMoves,
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchHandle {
+    stop: Arc<AtomicBool>,
+    pondering: Arc<AtomicBool>,
+}
+
+impl SearchHandle {
+    pub fn new(pondering: bool) -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            pondering: Arc::new(AtomicBool::new(pondering)),
+        }
+    }
+
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn ponderhit(&self) {
+        self.pondering.store(false, Ordering::Relaxed);
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +218,9 @@ pub struct Engine {
     stopped: bool,
     seldepth: u8,
     termination: TerminationReason,
+    control: SearchHandle,
+    pondering: bool,
+    time_enabled: bool,
 }
 impl Default for Engine {
     fn default() -> Self {
@@ -204,6 +241,9 @@ impl Engine {
             stopped: false,
             seldepth: 0,
             termination: TerminationReason::Depth,
+            control: SearchHandle::new(false),
+            pondering: false,
+            time_enabled: true,
         }
     }
     pub fn clear(&mut self) {
@@ -217,6 +257,17 @@ impl Engine {
         &mut self,
         b: &Board,
         limits: SearchLimits,
+        info: impl FnMut(&SearchResult),
+    ) -> SearchResult {
+        let control = SearchHandle::new(limits.ponder);
+        self.search_with_handle(b, limits, control, info)
+    }
+
+    pub fn search_with_handle(
+        &mut self,
+        b: &Board,
+        limits: SearchLimits,
+        control: SearchHandle,
         mut info: impl FnMut(&SearchResult),
     ) -> SearchResult {
         self.nodes = 0;
@@ -226,6 +277,9 @@ impl Engine {
         self.stopped = false;
         self.seldepth = 0;
         self.termination = TerminationReason::Depth;
+        self.pondering = limits.ponder;
+        self.time_enabled = !limits.infinite;
+        self.control = control;
         self.tt.new_search();
         let mut result = SearchResult {
             best_move: None,
@@ -287,7 +341,9 @@ impl Engine {
                 ScoreType::Centipawn
             };
             info(&result);
-            if result.score.abs() > MATE - 64 || self.start.elapsed() >= self.limit / 2 {
+            if result.score.abs() > MATE - 64
+                || (self.time_enabled && !self.pondering && self.start.elapsed() >= self.limit / 2)
+            {
                 result.termination = if result.score.abs() > MATE - 64 {
                     TerminationReason::Mate
                 } else {
@@ -349,11 +405,20 @@ impl Engine {
     ) -> i32 {
         self.nodes += 1;
         self.seldepth = self.seldepth.max(ply);
+        if self.control.is_stopped() {
+            self.stopped = true;
+            self.termination = TerminationReason::Cancelled;
+            return 0;
+        }
+        if self.pondering && !self.control.pondering.load(Ordering::Relaxed) {
+            self.pondering = false;
+            self.start = Instant::now();
+        }
         if ply >= 63 {
             return evaluate(b);
         }
         if self.nodes & 2047 == 0
-            && (self.start.elapsed() >= self.limit
+            && ((self.time_enabled && !self.pondering && self.start.elapsed() >= self.limit)
                 || self.node_limit.is_some_and(|n| self.nodes >= n))
         {
             self.stopped = true;
@@ -463,6 +528,11 @@ impl Engine {
     fn qsearch(&mut self, b: &mut Board, mut alpha: i32, beta: i32, ply: u8) -> i32 {
         self.nodes += 1;
         self.seldepth = self.seldepth.max(ply);
+        if self.control.is_stopped() {
+            self.stopped = true;
+            self.termination = TerminationReason::Cancelled;
+            return 0;
+        }
         if ply >= 63 {
             return evaluate(b);
         }
@@ -713,5 +783,28 @@ mod tests {
         assert_eq!(result.best_move, Some(only_move));
         assert!(result.seldepth >= result.depth);
         assert!(result.nps > 0);
+    }
+
+    #[test]
+    fn search_can_be_cancelled_from_another_thread() {
+        let control = SearchHandle::new(false);
+        let worker_control = control.clone();
+        let worker = std::thread::spawn(move || {
+            let mut engine = Engine::new();
+            engine.search_with_handle(
+                &Board::startpos(),
+                SearchLimits {
+                    infinite: true,
+                    ..SearchLimits::default()
+                },
+                worker_control,
+                |_| {},
+            )
+        });
+        std::thread::sleep(Duration::from_millis(10));
+        control.stop();
+        let result = worker.join().unwrap();
+        assert_eq!(result.termination, TerminationReason::Cancelled);
+        assert!(result.best_move.is_some());
     }
 }
