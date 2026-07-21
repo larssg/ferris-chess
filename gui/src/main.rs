@@ -34,9 +34,39 @@ fn main() -> eframe::Result {
     )
 }
 
-/// The web build arrives with the trunk/wasm milestone; the entry point is
-/// split already so nothing here needs restructuring for it.
+/// Web entry point, started by the trunk-generated loader in `index.html`.
+/// The canvas id must match the one in that file.
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    unimplemented!("web entry point lands with the wasm milestone");
+    use eframe::wasm_bindgen::JsCast as _;
+
+    // Route log output (including eframe's own web diagnostics) to the
+    // browser console; without this, startup failures are invisible.
+    eframe::WebLogger::init(log::LevelFilter::Debug).ok();
+
+    wasm_bindgen_futures::spawn_local(async {
+        let document = eframe::web_sys::window()
+            .expect("no window")
+            .document()
+            .expect("no document");
+        let canvas = document
+            .get_element_by_id("ferrischess_canvas")
+            .expect("index.html is missing #ferrischess_canvas")
+            .dyn_into::<eframe::web_sys::HtmlCanvasElement>()
+            .expect("#ferrischess_canvas is not a canvas");
+        let result = eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(|cc| {
+                    // Without the loaders the piece SVGs render as "?" placeholders.
+                    egui_extras::install_image_loaders(&cc.egui_ctx);
+                    Ok(Box::new(app::ChessApp::new()))
+                }),
+            )
+            .await;
+        if let Err(error) = result {
+            eframe::web_sys::console::error_2(&"eframe failed to start:".into(), &error);
+        }
+    });
 }

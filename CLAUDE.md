@@ -46,12 +46,16 @@ front-end (crate `chess-gui`, run with `cargo run -p chess-gui`).
 | `src/eval_tables.in` | Piece-square tables `include!`d by `eval.rs` (the active tables). |
 | `src/pst.in` | An earlier PST set; **not referenced by any code**. |
 | `gui/src/app.rs` | GUI state machine: setup screen vs. game, panels, engine-turn scheduling. |
-| `gui/src/engine_driver.rs` | Command/event facade over a worker thread that owns the `Engine`; the wasm seam (a web worker slots in behind the same surface). |
+| `gui/src/engine_driver.rs` | Command/event facade over the blocking search: native = worker thread; wasm = bounded main-thread slices with a warm TT (browsers can't block, and workers can't be interrupted without SharedArrayBuffer). |
+| `gui/index.html` | trunk page for the web build: `cd gui && trunk build --release` → static `gui/dist/`. |
 | `gui/src/board_widget.rs` | Board painting plus mouse (click/drag) and arrow-key-cursor interaction. |
 
 The engine library must keep compiling for wasm32
 (`cargo check --lib --target wasm32-unknown-unknown`); use
 `crate::clock::Instant`, never `std::time::Instant`, inside the library.
+The GUI pins eframe to the **glow** (WebGL2) backend — do not switch it back
+to the default wgpu backend: WebGPU is not available in all browsers and
+rendered nothing in headless testing.
 
 ## Conventions worth knowing
 

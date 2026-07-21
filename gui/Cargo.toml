@@ -5,6 +5,26 @@ edition = "2024"
 
 [dependencies]
 chess = { path = ".." }
-eframe = "0.35"
+# glow (OpenGL/WebGL2) instead of the default wgpu backend: WebGL2 runs on
+# every browser today (WebGPU does not), and a 2D board gains nothing from wgpu.
+eframe = { version = "0.35", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wayland",
+    "web_screen_reader",
+    "x11",
+] }
 egui = "0.35"
 egui_extras = { version = "0.35", default-features = false, features = ["svg"] }
+
+# Re-enable winit's default features (opting out of eframe's defaults above
+# also dropped its "winit/default" forward; features unify across the graph).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+winit = { version = "0.30.13", default-features = true }
+
+# The web build (trunk + wasm32) only needs spawn_local for the async
+# eframe starter; eframe re-exports wasm_bindgen and web_sys themselves.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+log = "0.4"

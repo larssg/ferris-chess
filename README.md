@@ -38,6 +38,28 @@ quit
 UCI options are `Hash` (1–4096 MB), `OwnBook`, and `Threads`. `Threads` is
 currently fixed at one; multi-worker lazy SMP is a later milestone.
 
+## Graphical interface
+
+The `gui/` crate is an egui front-end for playing against the engine — side
+selection, time controls, mouse and keyboard input, clocks, and live search
+info. It runs natively and in the browser.
+
+```sh
+cargo run --release -p chess-gui        # native window
+
+cd gui && trunk build --release         # web page in gui/dist/
+cd gui && trunk serve --release         # or serve it locally
+```
+
+The web build needs [trunk](https://trunkrs.dev) and the
+`wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`);
+`gui/dist/` is fully static and can be hosted anywhere (e.g. GitHub Pages).
+In the browser the search runs in bounded main-thread slices, so the page
+stays responsive while the engine thinks.
+
+Piece images are the cburnett set by Colin M.L. Burnett, used under
+CC BY-SA 3.0 — see `gui/assets/pieces/COPYING.md`.
+
 ## Validation
 
 ```sh

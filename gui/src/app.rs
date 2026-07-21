@@ -171,9 +171,12 @@ impl ChessApp {
                         }
                     });
                 });
+        } else if engine.searching() {
+            // Repaint immediately while thinking: on wasm the driver searches
+            // in per-frame slices, so idle gaps would waste the engine's clock.
+            ui.ctx().request_repaint();
         } else {
-            // Keep clocks ticking and search progress flowing even when the
-            // user isn't generating input events.
+            // Keep clocks ticking even when the user isn't generating input.
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
 

@@ -3,3 +3,4 @@
 /bench/data/wac.epd
 /bench/data/8moves_v3.pgn
 /bench/results/*.pgn
+/gui/dist/

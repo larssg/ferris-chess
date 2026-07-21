@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>FerrisChess</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- trunk builds this crate to wasm and injects the loader here -->
+    <link data-trunk rel="rust" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #1b1b1b;
+      }
+      #ferrischess_canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      #loading {
+        position: absolute;
+        top: 50%;
+        width: 100%;
+        text-align: center;
+        color: #ddd;
+        font-family: system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Replaced by the app as soon as the wasm module is up. -->
+    <div id="loading">Loading FerrisChess…</div>
+    <canvas id="ferrischess_canvas"></canvas>
+    <script type="module">
+      // Drop the loading text once eframe takes over the canvas.
+      const observer = new MutationObserver(() => {
+        const canvas = document.getElementById("ferrischess_canvas");
+        if (canvas && canvas.width > 0) {
+          document.getElementById("loading")?.remove();
+          observer.disconnect();
+        }
+      });
+      observer.observe(document.getElementById("ferrischess_canvas"), {
+        attributes: true,
+      });
+    </script>
+  </body>
+</html>
