@@ -62,9 +62,15 @@ impl ChessApp {
 
     fn show_setup(&mut self, ui: &mut egui::Ui) {
         let mut start = None;
-        egui::CentralPanel::default().show(ui, |ui| {
-            start = self.setup.show(ui);
-        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(244, 241, 234)))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        start = self.setup.show(ui);
+                    });
+            });
         if let Some(config) = start {
             let ctx = ui.ctx().clone();
             self.start_game(config, &ctx);
