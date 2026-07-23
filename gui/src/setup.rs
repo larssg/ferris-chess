@@ -115,70 +115,179 @@ impl SetupState {
     /// Draws the setup form; returns a config once Start is clicked.
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<GameConfig> {
         let mut start = None;
+        let ink = egui::Color32::from_rgb(42, 47, 43);
+        let muted = egui::Color32::from_rgb(112, 116, 108);
+        let green = egui::Color32::from_rgb(65, 111, 87);
+
         ui.vertical_centered(|ui| {
-            ui.add_space(24.0);
-            ui.heading("FerrisChess");
-            ui.add_space(24.0);
+            ui.add_space(30.0);
+            ui.label(
+                egui::RichText::new("FERRISCHESS")
+                    .size(12.0)
+                    .strong()
+                    .color(green),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Your next game awaits")
+                    .size(30.0)
+                    .strong()
+                    .color(ink),
+            );
+            ui.label(
+                egui::RichText::new("Choose your match settings and take a seat at the board.")
+                    .size(14.0)
+                    .color(muted),
+            );
+            ui.add_space(22.0);
 
-            ui.group(|ui| {
-                ui.set_width(320.0);
-                ui.label("Play as");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.side, SideChoice::White, "White");
-                    ui.selectable_value(&mut self.side, SideChoice::Black, "Black");
-                    ui.selectable_value(&mut self.side, SideChoice::Random, "Random");
-                });
-                ui.add_space(12.0);
+            let card_width = ui.available_width().min(500.0);
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(253, 252, 249))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgb(219, 216, 207),
+                ))
+                .corner_radius(14.0)
+                .inner_margin(egui::Margin::symmetric(28, 24))
+                .show(ui, |ui| {
+                    ui.set_width(card_width - 56.0);
+                    section_heading(ui, "YOUR SIDE", "Which pieces would you like?");
+                    ui.add_space(10.0);
+                    ui.columns(3, |columns| {
+                        choice_button(&mut columns[0], &mut self.side, SideChoice::White, "White");
+                        choice_button(&mut columns[1], &mut self.side, SideChoice::Black, "Black");
+                        choice_button(
+                            &mut columns[2],
+                            &mut self.side,
+                            SideChoice::Random,
+                            "Surprise me",
+                        );
+                    });
+                    ui.add_space(22.0);
 
-                ui.label("Time control");
-                ui.horizontal(|ui| {
-                    for preset in [Preset::Bullet, Preset::Blitz, Preset::Rapid, Preset::Custom] {
-                        ui.selectable_value(&mut self.preset, preset, preset.label());
+                    section_heading(ui, "TIME CONTROL", "How quickly should the game unfold?");
+                    ui.add_space(10.0);
+                    ui.columns(4, |columns| {
+                        for (column, preset) in columns.iter_mut().zip([
+                            Preset::Bullet,
+                            Preset::Blitz,
+                            Preset::Rapid,
+                            Preset::Custom,
+                        ]) {
+                            let selected = self.preset == preset;
+                            if option_button(column, selected, preset.label()).clicked() {
+                                self.preset = preset;
+                            }
+                        }
+                    });
+                    if self.preset == Preset::Custom {
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Minutes").color(muted));
+                            ui.add(egui::DragValue::new(&mut self.custom_minutes).range(1..=180));
+                            ui.add_space(12.0);
+                            ui.label(egui::RichText::new("Increment").color(muted));
+                            ui.add(egui::DragValue::new(&mut self.custom_increment).range(0..=60));
+                            ui.label(egui::RichText::new("seconds").color(muted));
+                        });
+                    }
+                    ui.add_space(22.0);
+
+                    section_heading(ui, "OPPONENT", "Choose how far ahead FerrisChess looks.");
+                    ui.add_space(10.0);
+                    ui.columns(4, |columns| {
+                        for (column, level) in columns.iter_mut().zip(Difficulty::ALL) {
+                            let selected = self.difficulty == level;
+                            if option_button(column, selected, level.label()).clicked() {
+                                self.difficulty = level;
+                            }
+                        }
+                    });
+                    ui.add_space(20.0);
+
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(244, 247, 242))
+                        .corner_radius(8.0)
+                        .inner_margin(egui::Margin::symmetric(12, 9))
+                        .show(ui, |ui| {
+                            ui.checkbox(
+                                &mut self.use_book,
+                                "Use the opening book for natural early play",
+                            );
+                        });
+                    ui.add_space(20.0);
+
+                    let button = egui::Button::new(
+                        egui::RichText::new("Start game  →")
+                            .size(16.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(green)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(8.0);
+                    if ui.add_sized([ui.available_width(), 44.0], button).clicked() {
+                        let (minutes, increment) = self
+                            .preset
+                            .minutes_and_increment()
+                            .unwrap_or((self.custom_minutes, self.custom_increment));
+                        start = Some(GameConfig {
+                            side: self.side,
+                            time_control: TimeControl {
+                                base: Duration::from_secs(u64::from(minutes) * 60),
+                                increment: Duration::from_secs(u64::from(increment)),
+                            },
+                            difficulty: self.difficulty,
+                            use_book: self.use_book,
+                        });
                     }
                 });
-                if self.preset == Preset::Custom {
-                    ui.horizontal(|ui| {
-                        ui.label("Minutes:");
-                        ui.add(egui::DragValue::new(&mut self.custom_minutes).range(1..=180));
-                        ui.label("Increment (s):");
-                        ui.add(egui::DragValue::new(&mut self.custom_increment).range(0..=60));
-                    });
-                }
-                ui.add_space(12.0);
-
-                ui.label("Difficulty");
-                ui.horizontal(|ui| {
-                    for level in Difficulty::ALL {
-                        ui.selectable_value(&mut self.difficulty, level, level.label());
-                    }
-                });
-                ui.add_space(12.0);
-
-                ui.checkbox(&mut self.use_book, "Engine uses its opening book");
-                ui.add_space(12.0);
-
-                if ui
-                    .add_sized([120.0, 32.0], egui::Button::new("Start game"))
-                    .clicked()
-                {
-                    let (minutes, increment) = self
-                        .preset
-                        .minutes_and_increment()
-                        .unwrap_or((self.custom_minutes, self.custom_increment));
-                    start = Some(GameConfig {
-                        side: self.side,
-                        time_control: TimeControl {
-                            base: Duration::from_secs(u64::from(minutes) * 60),
-                            increment: Duration::from_secs(u64::from(increment)),
-                        },
-                        difficulty: self.difficulty,
-                        use_book: self.use_book,
-                    });
-                }
-            });
+            ui.add_space(24.0);
         });
         start
     }
+}
+
+fn section_heading(ui: &mut egui::Ui, title: &str, description: &str) {
+    ui.label(
+        egui::RichText::new(title)
+            .size(12.0)
+            .strong()
+            .color(egui::Color32::from_rgb(65, 111, 87)),
+    );
+    ui.label(
+        egui::RichText::new(description)
+            .size(13.0)
+            .color(egui::Color32::from_rgb(112, 116, 108)),
+    );
+}
+
+fn choice_button<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, choice: T, label: &str) {
+    if option_button(ui, *value == choice, label).clicked() {
+        *value = choice;
+    }
+}
+
+fn option_button(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
+    let (fill, stroke, text) = if selected {
+        (
+            egui::Color32::from_rgb(226, 237, 229),
+            egui::Color32::from_rgb(65, 111, 87),
+            egui::Color32::from_rgb(45, 83, 63),
+        )
+    } else {
+        (
+            egui::Color32::from_rgb(248, 247, 243),
+            egui::Color32::from_rgb(218, 216, 208),
+            egui::Color32::from_rgb(65, 68, 64),
+        )
+    };
+    let button = egui::Button::new(egui::RichText::new(label).size(14.0).color(text))
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke))
+        .corner_radius(7.0);
+    ui.add_sized([ui.available_width(), 38.0], button)
 }
 
 /// Resolves a Random side choice with the low bit of egui's frame clock at
