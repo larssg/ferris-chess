@@ -219,7 +219,7 @@ impl SetupState {
                     ui.add_space(20.0);
 
                     let button = egui::Button::new(
-                        egui::RichText::new("Start game  →")
+                        egui::RichText::new("Start game")
                             .size(16.0)
                             .strong()
                             .color(egui::Color32::WHITE),
