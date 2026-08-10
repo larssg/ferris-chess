@@ -7,7 +7,7 @@ edition = "2024"
 chess = { path = ".." }
 # glow (OpenGL/WebGL2) instead of the default wgpu backend: WebGL2 runs on
 # every browser today (WebGPU does not), and a 2D board gains nothing from wgpu.
-eframe = { version = "0.35", default-features = false, features = [
+eframe = { version = "0.36", default-features = false, features = [
     "accesskit",
     "default_fonts",
     "glow",
