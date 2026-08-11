@@ -7,7 +7,7 @@ edition = "2024"
 chess = { path = ".." }
 # glow (OpenGL/WebGL2) instead of the default wgpu backend: WebGL2 runs on
 # every browser today (WebGPU does not), and a 2D board gains nothing from wgpu.
-eframe = { version = "0.35", default-features = false, features = [
+eframe = { version = "0.36", default-features = false, features = [
     "accesskit",
     "default_fonts",
     "glow",
@@ -15,8 +15,8 @@ eframe = { version = "0.35", default-features = false, features = [
     "web_screen_reader",
     "x11",
 ] }
-egui = "0.35"
-egui_extras = { version = "0.35", default-features = false, features = ["svg"] }
+egui = "0.36"
+egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
 
 # Re-enable winit's default features (opting out of eframe's defaults above
 # also dropped its "winit/default" forward; features unify across the graph).
