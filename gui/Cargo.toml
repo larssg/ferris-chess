@@ -15,7 +15,7 @@ eframe = { version = "0.36", default-features = false, features = [
     "web_screen_reader",
     "x11",
 ] }
-egui = "0.36"
+egui = "0.37"
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
 
 # Re-enable winit's default features (opting out of eframe's defaults above
